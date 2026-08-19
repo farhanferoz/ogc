@@ -74,11 +74,18 @@ func (t *ResponseTransformer) transformContent(msg types.ChatMessage) ([]types.C
 		})
 	}
 
-	// Handle text content.
-	if msg.Content != "" {
+	// Handle text content (including reasoning/thinking fallback)
+	textContent := msg.Content
+	if textContent == "" {
+		textContent = msg.Reasoning
+	}
+	if textContent == "" {
+		textContent = msg.ReasoningContent
+	}
+	if textContent != "" {
 		blocks = append(blocks, types.ContentBlock{
 			Type: "text",
-			Text: msg.Content,
+			Text: textContent,
 		})
 	}
 

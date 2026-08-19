@@ -5,6 +5,7 @@ package transformer
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/xynogen/ogc/internal/config"
 	"github.com/xynogen/ogc/pkg/types"
@@ -51,8 +52,8 @@ func (t *RequestTransformer) TransformRequest(
 	}
 
 	// Apply model-specific overrides
-	if model.Temperature > 0 {
-		openaiReq.Temperature = &model.Temperature
+	if model.Temperature != nil {
+		openaiReq.Temperature = model.Temperature
 	}
 	if model.MaxTokens > 0 {
 		maxTokens := model.MaxTokens
@@ -69,12 +70,21 @@ func (t *RequestTransformer) TransformRequest(
 
 // transformMessages converts Anthropic messages to OpenAI format.
 func (t *RequestTransformer) transformMessages(anthropicReq *types.MessageRequest) ([]types.ChatMessage, error) {
-	var result []types.ChatMessage
+	var raw []types.ChatMessage
 
 	// Add system message if present
 	systemText := anthropicReq.SystemText()
+	if len(anthropicReq.Tools) > 0 {
+		const toolDirective = "\n\n[Tool Use Directive: When you need to read, write, search, or edit files, or execute commands, you MUST directly invoke the appropriate tool call. Do NOT output conversational narration describing the action without emitting the tool call in the same turn.]"
+		if systemText != "" {
+			systemText += toolDirective
+		} else {
+			systemText = strings.TrimPrefix(toolDirective, "\n\n")
+		}
+	}
+
 	if systemText != "" {
-		result = append(result, types.ChatMessage{
+		raw = append(raw, types.ChatMessage{
 			Role:    "system",
 			Content: systemText,
 		})
@@ -86,10 +96,60 @@ func (t *RequestTransformer) transformMessages(anthropicReq *types.MessageReques
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, openaiMsgs...)
+		raw = append(raw, openaiMsgs...)
 	}
 
-	return result, nil
+	return t.fixToolMessageOrdering(raw), nil
+}
+
+// fixToolMessageOrdering ensures tool messages strictly follow assistant tool_calls
+// and inserts synthetic tool responses for any dangling/interrupted tool calls.
+func (t *RequestTransformer) fixToolMessageOrdering(messages []types.ChatMessage) []types.ChatMessage {
+	var result []types.ChatMessage
+
+	i := 0
+	for i < len(messages) {
+		msg := messages[i]
+		result = append(result, msg)
+		i++
+
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			toolCallsNeeded := make(map[string]bool)
+			for _, tc := range msg.ToolCalls {
+				toolCallsNeeded[tc.ID] = true
+			}
+
+			var toolMsgs []types.ChatMessage
+			var nonToolMsgs []types.ChatMessage
+
+			for i < len(messages) && messages[i].Role != "assistant" {
+				next := messages[i]
+				if next.Role == "tool" && toolCallsNeeded[next.ToolCallID] {
+					toolMsgs = append(toolMsgs, next)
+					delete(toolCallsNeeded, next.ToolCallID)
+				} else {
+					nonToolMsgs = append(nonToolMsgs, next)
+				}
+				i++
+			}
+
+			result = append(result, toolMsgs...)
+
+			for _, tc := range msg.ToolCalls {
+				if toolCallsNeeded[tc.ID] {
+					result = append(result, types.ChatMessage{
+						Role:       "tool",
+						Content:    "[Operation interrupted by user]",
+						ToolCallID: tc.ID,
+					})
+				}
+			}
+
+			result = append(result, nonToolMsgs...)
+		}
+	}
+
+	return result
 }
 
 // transformMessage converts a single Anthropic message to one or more OpenAI messages.
@@ -137,15 +197,13 @@ func (t *RequestTransformer) transformUserMessage(blocks []types.ContentBlock) (
 		}
 	}
 
-	// If there's text content, add it as a user message
+	// If there's text content, append after tool results
 	if len(textParts) > 0 {
 		text := ""
 		for _, p := range textParts {
 			text += p
 		}
-		// Prepend user text before tool results
-		userMsg := types.ChatMessage{Role: "user", Content: text}
-		result = append([]types.ChatMessage{userMsg}, result...)
+		result = append(result, types.ChatMessage{Role: "user", Content: text})
 	}
 
 	return result, nil

@@ -195,8 +195,7 @@ func (h *MessagesHandler) handleStreaming(
 
 	rw := &responseWriter{ResponseWriter: w}
 
-	// Set SSE headers immediately so Claude Code knows the stream is alive.
-	// This prevents client-side timeouts before we even start sending data.
+	// Set SSE headers so Claude Code knows the stream is alive.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -206,21 +205,24 @@ func (h *MessagesHandler) handleStreaming(
 		f.Flush()
 	}
 
-	// Start heartbeat to keep connection alive while waiting for upstream.
-	// Claude Code times out after ~6 seconds of no data, so we send pings every 3 seconds
-	// (frequent enough to prevent timeout, not so frequent as to cause overhead).
+	sseWriter := transformer.NewSSEWriter(rw)
+	defer sseWriter.Close()
+
+	// Send initial ping immediately so Claude Code knows the stream is active
+	_ = sseWriter.Ping()
+
+	// Start synchronized heartbeat ticker to keep connection alive while waiting for upstream and during generation.
+	// Claude Code client times out if no SSE events or bytes arrive within ~30s-60s during long prefill (e.g. 100k+ tokens).
 	heartbeatDone := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(3 * time.Second)
+		ticker := time.NewTicker(2500 * time.Millisecond)
 		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ticker.C:
-				// Send SSE comment (ignored by client but keeps connection alive)
-				fmt.Fprintf(w, ":keepalive\n\n")
-				if f, ok := w.(http.Flusher); ok {
-					f.Flush()
+				if err := sseWriter.Ping(); err != nil {
+					return
 				}
 			case <-heartbeatDone:
 				return
@@ -229,7 +231,6 @@ func (h *MessagesHandler) handleStreaming(
 			}
 		}
 	}()
-	// Stop heartbeat when streaming completes
 	defer close(heartbeatDone)
 
 	streamStart := time.Now()
@@ -247,7 +248,7 @@ func (h *MessagesHandler) handleStreaming(
 
 		// Create a fresh context with timeout for THIS attempt only.
 		// Don't use r.Context() directly - it gets canceled when Claude Code retries.
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 
 		if model.Provider == "anthropic" {
 			// For MiniMax models, send raw Anthropic request to Anthropic endpoint
@@ -276,7 +277,7 @@ func (h *MessagesHandler) handleStreaming(
 			continue
 		}
 
-		// Get streaming body from upstream
+		// Get streaming body from upstream (pings keep connection alive during prefill wait)
 		streamBody, err := h.client.GetStreamingBody(ctx, model.ModelID, openaiReq)
 		if err != nil {
 			cancel()
@@ -290,16 +291,11 @@ func (h *MessagesHandler) handleStreaming(
 		}
 
 		// Proxy the stream: transform OpenAI SSE → Anthropic SSE in real-time
-		if err := h.streamHandler.ProxyStream(rw, streamBody, model.ModelID, clientCtx); err != nil {
+		if err := h.streamHandler.ProxyStream(sseWriter, streamBody, model.ModelID, clientCtx); err != nil {
 			streamBody.Close()
 			cancel()
-			if err == transformer.ErrClientDisconnected {
+			if err == transformer.ErrClientDisconnected || clientCtx.Err() == context.Canceled {
 				h.logger.Info("client disconnected during stream")
-				return
-			}
-			// Check if this was a client disconnect
-			if clientCtx.Err() == context.Canceled {
-				h.logger.Info("client disconnected during stream (context canceled)")
 				return
 			}
 			h.logger.Warn("stream proxy failed", "model", model.ModelID, "error", err)
@@ -320,7 +316,7 @@ func (h *MessagesHandler) handleStreaming(
 		h.sendError(w, http.StatusBadGateway, "all streaming models failed", nil)
 	} else {
 		// Headers already sent - send error as SSE event
-		h.sendStreamError(rw, "all upstream models failed")
+		h.sendStreamError(sseWriter, "all upstream models failed")
 	}
 }
 
@@ -427,23 +423,16 @@ func (h *MessagesHandler) handleAnthropicStreaming(
 
 // sendStreamError sends an error event in the SSE stream.
 // Use this when headers have already been written.
-func (h *MessagesHandler) sendStreamError(w http.ResponseWriter, message string) {
+func (h *MessagesHandler) sendStreamError(sseWriter *transformer.SSEWriter, message string) {
 	h.logger.Error("sending stream error", "message", message)
 
-	errorEvent := map[string]interface{}{
-		"type": "error",
-		"error": map[string]interface{}{
-			"type":    "api_error",
-			"message": message,
+	_ = sseWriter.WriteEvent(types.MessageEvent{
+		Type: "error",
+		Error: &types.APIError{
+			Type:    "api_error",
+			Message: message,
 		},
-	}
-
-	data, _ := json.Marshal(errorEvent)
-	fmt.Fprintf(w, "event: error\ndata: %s\n\n", string(data))
-
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
+	})
 }
 
 // handleNonStreaming handles a non-streaming request with fallback.

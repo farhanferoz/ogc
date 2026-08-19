@@ -23,7 +23,8 @@ type ChatCompletionRequest struct {
 type ChatMessage struct {
 	Role       string     `json:"role"`
 	Content    string     `json:"content,omitempty"`
-	Reasoning  string     `json:"reasoning,omitempty"`  // extended-thinking models (Kimi, DeepSeek R1)
+	Reasoning        string     `json:"reasoning,omitempty"`          // extended-thinking models (Kimi, DeepSeek R1)
+	ReasoningContent string     `json:"reasoning_content,omitempty"`  // extended-thinking models (GLM, DeepSeek)
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	Name       string     `json:"name,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
@@ -31,6 +32,7 @@ type ChatMessage struct {
 
 // ToolCall represents a function call made by the model.
 type ToolCall struct {
+	Index    *int         `json:"index,omitempty"`
 	ID       string       `json:"id"`
 	Type     string       `json:"type"`
 	Function FunctionCall `json:"function"`

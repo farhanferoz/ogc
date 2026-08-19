@@ -15,11 +15,11 @@ type Config struct {
 
 // ModelConfig defines routing rules for a specific model.
 type ModelConfig struct {
-	Provider         string  `json:"provider"`
-	ModelID          string  `json:"model_id"`
-	Temperature      float64 `json:"temperature"`
-	MaxTokens        int     `json:"max_tokens"`
-	ContextThreshold int     `json:"context_threshold"`
+	Provider         string   `json:"provider"`
+	ModelID          string   `json:"model_id"`
+	Temperature      *float64 `json:"temperature,omitempty"`
+	MaxTokens        int      `json:"max_tokens"`
+	ContextThreshold int      `json:"context_threshold"`
 }
 
 // UpstreamConfig holds the upstream API settings.

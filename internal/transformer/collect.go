@@ -162,9 +162,10 @@ func CollectOpenAIStream(body io.ReadCloser) (*types.ChatCompletionResponse, err
 		Created int64  `json:"created"`
 		Choices []struct {
 			Delta struct {
-				Content   string           `json:"content"`
-				Reasoning string           `json:"reasoning"`
-				ToolCalls []streamToolCall `json:"tool_calls"`
+				Content          string           `json:"content"`
+				Reasoning        string           `json:"reasoning"`
+				ReasoningContent string           `json:"reasoning_content"`
+				ToolCalls        []streamToolCall `json:"tool_calls"`
 			} `json:"delta"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -199,6 +200,7 @@ func CollectOpenAIStream(body io.ReadCloser) (*types.ChatCompletionResponse, err
 			choice := chunk.Choices[0]
 			contentBuf.WriteString(choice.Delta.Content)
 			reasoningBuf.WriteString(choice.Delta.Reasoning)
+			reasoningBuf.WriteString(choice.Delta.ReasoningContent)
 			if choice.FinishReason != "" {
 				finishReason = choice.FinishReason
 			}

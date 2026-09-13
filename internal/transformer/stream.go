@@ -94,6 +94,9 @@ type streamSession struct {
 	originalModel       string
 	responseTransformer *ResponseTransformer
 	nextIndex           int
+	thinkingStarted     bool
+	thinkingClosed      bool
+	thinkingIndex       int
 	textStarted         bool
 	textClosed          bool
 	textIndex           int
@@ -102,7 +105,7 @@ type streamSession struct {
 	closed              bool
 }
 
-func newStreamSession(writer *SSEWriter, originalModel string, transformer *ResponseTransformer) (*streamSession, error) {
+func newStreamSession(writer *SSEWriter, originalModel string, transformer *ResponseTransformer, inputTokens int) (*streamSession, error) {
 	s := &streamSession{
 		writer:              writer,
 		originalModel:       originalModel,
@@ -119,7 +122,7 @@ func newStreamSession(writer *SSEWriter, originalModel string, transformer *Resp
 			Content: []types.ContentBlock{},
 			Model:   originalModel,
 			Usage: types.Usage{
-				InputTokens:  0,
+				InputTokens:  inputTokens,
 				OutputTokens: 0,
 			},
 		},
@@ -131,9 +134,59 @@ func newStreamSession(writer *SSEWriter, originalModel string, transformer *Resp
 	return s, nil
 }
 
+func (s *streamSession) emitThinking(thinking string) error {
+	if thinking == "" {
+		return nil
+	}
+
+	if !s.thinkingStarted {
+		s.thinkingStarted = true
+		s.thinkingIndex = s.nextIndex
+		s.nextIndex++
+
+		startEvent := types.MessageEvent{
+			Type:  "content_block_start",
+			Index: &s.thinkingIndex,
+			ContentBlock: &types.ContentBlock{
+				Type:     "thinking",
+				Thinking: "",
+			},
+		}
+		if err := s.writer.WriteEvent(startEvent); err != nil {
+			return ErrClientDisconnected
+		}
+	}
+
+	delta := types.Delta{
+		Type:     "thinking_delta",
+		Thinking: thinking,
+	}
+	event := types.MessageEvent{
+		Type:  "content_block_delta",
+		Index: &s.thinkingIndex,
+		Delta: &delta,
+	}
+	if err := s.writer.WriteEvent(event); err != nil {
+		return ErrClientDisconnected
+	}
+	return nil
+}
+
 func (s *streamSession) emitText(text string) error {
 	if text == "" {
 		return nil
+	}
+
+	// Close thinking block if open before text begins
+	if s.thinkingStarted && !s.thinkingClosed {
+		s.thinkingClosed = true
+		stopEvent := types.MessageEvent{
+			Type:  "content_block_stop",
+			Index: &s.thinkingIndex,
+		}
+		if err := s.writer.WriteEvent(stopEvent); err != nil {
+			return ErrClientDisconnected
+		}
 	}
 
 	if !s.textStarted {
@@ -170,6 +223,18 @@ func (s *streamSession) emitText(text string) error {
 }
 
 func (s *streamSession) emitToolCallChunk(tc types.ToolCall, openaiIndex int) error {
+	// Close thinking block if open before tool use begins
+	if s.thinkingStarted && !s.thinkingClosed {
+		s.thinkingClosed = true
+		stopEvent := types.MessageEvent{
+			Type:  "content_block_stop",
+			Index: &s.thinkingIndex,
+		}
+		if err := s.writer.WriteEvent(stopEvent); err != nil {
+			return ErrClientDisconnected
+		}
+	}
+
 	// If text block is still open, close it before tool use begins
 	if s.textStarted && !s.textClosed {
 		s.textClosed = true
@@ -239,6 +304,18 @@ func (s *streamSession) close(finishReason string, usage *types.UsageInfo) error
 	}
 	s.closed = true
 
+	// Close thinking block if open
+	if s.thinkingStarted && !s.thinkingClosed {
+		s.thinkingClosed = true
+		stopEvent := types.MessageEvent{
+			Type:  "content_block_stop",
+			Index: &s.thinkingIndex,
+		}
+		if err := s.writer.WriteEvent(stopEvent); err != nil {
+			return ErrClientDisconnected
+		}
+	}
+
 	// Close text block if open
 	if s.textStarted && !s.textClosed {
 		s.textClosed = true
@@ -306,8 +383,9 @@ func (h *StreamHandler) ProxyStream(
 	openaiResp io.ReadCloser,
 	originalModel string,
 	clientCtx context.Context,
+	inputTokens int,
 ) error {
-	session, err := newStreamSession(sseWriter, originalModel, h.responseTransformer)
+	session, err := newStreamSession(sseWriter, originalModel, h.responseTransformer, inputTokens)
 	if err != nil {
 		return err
 	}
@@ -390,16 +468,20 @@ func (h *StreamHandler) processSSELine(
 		*lastFinishReason = choice.FinishReason
 	}
 
-	// Handle text deltas (including thinking/reasoning deltas)
-	textToken := choice.Delta.Content
-	if textToken == "" {
-		textToken = choice.Delta.Reasoning
+	// Handle thinking/reasoning deltas
+	reasoningToken := choice.Delta.Reasoning
+	if reasoningToken == "" {
+		reasoningToken = choice.Delta.ReasoningContent
 	}
-	if textToken == "" {
-		textToken = choice.Delta.ReasoningContent
+	if reasoningToken != "" {
+		if err := session.emitThinking(reasoningToken); err != nil {
+			return err
+		}
 	}
-	if textToken != "" {
-		if err := session.emitText(textToken); err != nil {
+
+	// Handle regular text deltas
+	if choice.Delta.Content != "" {
+		if err := session.emitText(choice.Delta.Content); err != nil {
 			return err
 		}
 	}

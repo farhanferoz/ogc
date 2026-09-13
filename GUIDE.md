@@ -257,7 +257,17 @@ opencode-claude() {
     OPENCODE=1 claude "${extra_flags[@]}" "$@"
 }
 
+# ccage-auto autonomous context-managed wrapper
+opencode-ccage-auto() {
+    local OPENCODE_PREPARED_MODEL=""
+    local OPENCODE_PREPARED_CTX=""
+    local OPENCODE_PREPARED_FLAGS=()
+    _opencode_prepare_args "$@" || return $?
+    OPENCODE=1 ccage-auto --window "$OPENCODE_PREPARED_CTX" "${OPENCODE_PREPARED_FLAGS[@]}" "$@"
+}
+
 alias opencode-ccage-yolo="opencode-claude --dangerously-skip-permissions"
+alias opencode-ccage-auto-yolo="opencode-ccage-auto --dangerously-skip-permissions"
 ```
 
 ---
@@ -338,7 +348,7 @@ fi
 
 ## 3. Core Protocol Patches & Optimizations in `ogc`
 
-The following 6 protocol patches in `~/dev/opencode` ensure robust, hang-free Claude Code execution against OpenCode Go frontier models:
+The following 8 protocol patches in `~/dev/opencode` ensure robust, hang-free Claude Code execution against OpenCode Go frontier models:
 
 ### Patch 1: Thread-Safe `SSEWriter` with Continuous Heartbeat / Ping Keepalive (`internal/transformer/stream.go`, `internal/handlers/messages.go`)
 * **Problem:** On large contexts (100k+ tokens) with full toolchains, upstream prompt evaluation (TTFT) takes 30–70s before any token chunks arrive. Without data on the socket, Claude Code's stream watchdog times out and enters exponential backoff retry loops (`Waiting for API response · will retry in Xm Ys · check your network`). Raw unmutexed background heartbeats suffered TCP chunk data races that corrupted SSE framing.
@@ -359,13 +369,21 @@ The following 6 protocol patches in `~/dev/opencode` ensure robust, hang-free Cl
 * **Problem:** Naive substring fast-paths looking for `"delta":{"content":"` fail when text tokens contain escaped quotes (`\"`), backslashes, or code blocks, truncating content and double-escaping newlines.
 * **Solution:** Removed manual string slicing in favor of standard `json.Unmarshal`, ensuring complete fidelity for complex code blocks, JSON payloads, and multiline responses.
 
-### Patch 5: Real-Time Reasoning & Thinking Delta Streaming (`pkg/types/openai.go`, `internal/transformer/stream.go`, `internal/transformer/collect.go`)
-* **Problem:** Frontier models like `glm-5.3` and DeepSeek stream thinking tokens under `delta.reasoning_content` (OpenAI extended format). If unparsed, thinking tokens are dropped, causing long silent periods that trigger client timeouts.
-* **Solution:** Map `delta.reasoning_content` to Anthropic `content_block_delta` (`text_delta`) so tokens stream immediately from the first millisecond of generation.
+### Patch 5: Native Anthropic `thinking` Block Streaming (`pkg/types/anthropic.go`, `internal/transformer/stream.go`, `internal/transformer/collect.go`)
+* **Problem:** Frontier models like `qwen3.8-max` and `glm-5.3` stream thinking tokens under `delta.reasoning_content` (OpenAI extended format). If unparsed, thinking tokens are dropped; if emitted as regular text, raw exploratory self-debate is dumped into the user chat and prompt history.
+* **Solution:** Map `delta.reasoning_content` to Anthropic `content_block_start` (`type: "thinking"`) and `thinking_delta`, allowing Claude Code to capture reasoning in its native collapsible thinking spinner without polluting chat text.
 
 ### Patch 6: Strict Tool Message Ordering & Interruption Recovery (`internal/transformer/request.go`)
 * **Problem:** OpenAI APIs reject requests if an `assistant` message with `tool_calls` is not immediately followed by `tool` role messages responding to each `tool_call_id`. If a user interrupts mid-turn (`Ctrl+C`), dangling tool calls cause perpetual 400 Bad Request loops.
 * **Solution:** `fixToolMessageOrdering` inspects all assistant tool calls and synthesizes `role: "tool", content: "[Operation interrupted by user]"` for any missing responses.
+
+### Patch 7: Upfront Prompt Token Counting in `message_start` Stream Header (`internal/token/counter.go`, `internal/transformer/stream.go`, `internal/handlers/messages.go`)
+* **Problem:** Claude Code calculates its status line context ratio (`ctx: x%`) strictly from the `input_tokens` reported in the initial `message_start` SSE event. OpenAI-compatible streaming backends only report prompt tokens at the end of the stream in the final chunk. Because `ogc` originally initialized streaming with `input_tokens: 0`, Claude Code recorded `0` input tokens for every streaming assistant turn, causing the status line to oscillate between `0%` and the true percentage.
+* **Solution:** Added `CountRequest` on `token.Counter` to pre-calculate accurate prompt tokens (system text, full message history blocks, tool schemas, and framing tokens) and inject `Usage.InputTokens` directly into `message_start` before streaming begins.
+
+### Patch 8: Dynamic Upstream Request Timeout Configuration (`internal/handlers/messages.go`)
+* **Problem:** `handleStreaming` previously had a hardcoded `3*time.Minute` timeout context, which could prematurely abort massive 100k+ token prefill operations on heavy frontier reasoning models.
+* **Solution:** Updated request context creation to dynamically read `Upstream.TimeoutMs` (e.g. 5 minutes / 300,000ms), giving complex models sufficient time while keeping connection watchdog timers alive with SSE ping heartbeats.
 
 ---
 

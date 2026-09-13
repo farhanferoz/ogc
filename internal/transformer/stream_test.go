@@ -33,7 +33,7 @@ data: [DONE]
 	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 	writer := NewSSEWriter(rec)
 
-	err := handler.ProxyStream(writer, body, "glm-5.3", context.Background())
+	err := handler.ProxyStream(writer, body, "glm-5.3", context.Background(), 1250)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -42,8 +42,14 @@ data: [DONE]
 	if !strings.Contains(out, "message_start") {
 		t.Errorf("missing message_start in output: %s", out)
 	}
-	if !strings.Contains(out, "Thinking about 2+2...") {
-		t.Errorf("missing reasoning delta in output: %s", out)
+	if !strings.Contains(out, `"input_tokens":1250`) {
+		t.Errorf("missing input_tokens in message_start: %s", out)
+	}
+	if !strings.Contains(out, `"type":"thinking"`) {
+		t.Errorf("missing thinking block start in output: %s", out)
+	}
+	if !strings.Contains(out, `"thinking":"Thinking about 2+2..."`) {
+		t.Errorf("missing thinking delta in output: %s", out)
 	}
 	if !strings.Contains(out, `"text":"4"`) {
 		t.Errorf("missing text delta in output: %s", out)
@@ -73,7 +79,7 @@ data: [DONE]
 	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 	writer := NewSSEWriter(rec)
 
-	err := handler.ProxyStream(writer, body, "qwen3.8-max", context.Background())
+	err := handler.ProxyStream(writer, body, "qwen3.8-max", context.Background(), 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -111,7 +117,7 @@ data: [DONE]
 	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 	writer := NewSSEWriter(rec)
 
-	err := handler.ProxyStream(writer, body, "glm-5.3", context.Background())
+	err := handler.ProxyStream(writer, body, "glm-5.3", context.Background(), 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -162,7 +168,7 @@ data: [DONE]
 	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 	writer := NewSSEWriter(rec)
 
-	err := handler.ProxyStream(writer, body, "glm-5.3", context.Background())
+	err := handler.ProxyStream(writer, body, "glm-5.3", context.Background(), 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

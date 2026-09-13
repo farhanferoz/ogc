@@ -25,10 +25,31 @@ This local build of `ogc` includes critical fixes for high-reliability Claude Co
 - **Problem**: `ToolCall` was missing the `Index *int` field in `pkg/types/openai.go`. When upstream emitted multiple parallel tool calls across chunks, chunks for subsequent tool calls were erroneously attributed to tool index 0, merging separate tool calls into corrupted single blocks.
 - **Fix**: Added `Index *int` to `ToolCall` and updated `processSSELine` to use `*tc.Index` for correct parallel tool tracking.
 
-### 5. Temperature Override Bug Fix & Greedy Decoding Support (`internal/config/config.go`, `internal/transformer/request.go`)
-- **Problem**: `ModelConfig.Temperature` was defined as `float64`, and the override logic checked `if model.Temperature > 0`. When setting `"temperature": 0.0` in `config.json` for deterministic tool execution, Go evaluated `0.0 > 0` as `false`, silently ignoring the override and falling back to the upstream provider's `0.7`/`1.0` default. This caused conversational drift, hallucinated code blocks, and dropped tool calls in distilled/flash models (`deepseek-v4-flash`).
-- **Fix**: Changed `Temperature` to `*float64` across config and request structs and checked `if model.Temperature != nil`. All model presets in `config.json` updated to `0.0` for deterministic greedy tool calling.
+### 5. Temperature Override Pointer Fix & Calibrated Sampling (`internal/config/config.go`, `internal/transformer/request.go`)
+- **Problem**: `ModelConfig.Temperature` was originally defined as `float64`, and the override logic checked `if model.Temperature > 0`. When setting explicit custom temperatures in `config.json`, Go zero-value evaluation caused edge cases. Furthermore, setting `0.0` (greedy decoding) on frontier reasoning models (like `qwen3.8-max`, `glm-5.3`) caused them to get trapped in recursive self-debating loops.
+- **Fix**: Changed `Temperature` to `*float64` across config and request structs and checked `if model.Temperature != nil`. Configured default temperature to `0.7` across model presets in `config.json` for natural reasoning without deterministic deliberation traps.
 
 ### 6. System Prompt Tool-Calling Discipline Directive (`internal/transformer/request.go`)
 - **Problem**: Distilled/flash models frequently output conversational intent (e.g. *"Let me read the next section:"*) and end their turn with `<|im_end|>` rather than emitting structured OpenAI `tool_calls`, yielding the prompt back to the human.
 - **Fix**: When `len(anthropicReq.Tools) > 0`, `ogc` automatically appends a targeted directive instructing the model to invoke the tool directly rather than outputting conversational narration without a tool payload.
+
+### 7. Upfront Prompt Token Counting in `message_start` Streaming Event (`internal/token/counter.go`, `internal/transformer/stream.go`, `internal/handlers/messages.go`)
+- **Problem**: Claude Code calculates its status line context percentage (`ctx: x%`) strictly from the `input_tokens` reported in the initial `message_start` SSE event. OpenAI-compatible streaming endpoints (e.g. OpenCode Go) do not report prompt token usage until the final stream chunk. Because `ogc` initialized streaming sessions with `Usage.InputTokens: 0` in `message_start`, Claude Code recorded `0` input tokens for every streaming assistant turn, causing the status line to oscillate between `0%` (after streaming turns) and `x%` (after non-streaming turns).
+- **Fix**:
+  - Implemented `CountRequest` on `token.Counter` to accurately tally system prompt, message history (including text, tool_use, tool_result, and thinking blocks), tool schemas, and framing tokens.
+  - In `handleStreaming`, `ogc` calculates `inputTokens` upfront and populates `Usage.InputTokens` directly in the initial `message_start` SSE frame.
+  - Enabled `stream_options: {"include_usage": true}` on OpenAI chat completion requests for backends supporting stream usage.
+
+### 8. Native Anthropic `thinking` Block Streaming Transformation (`pkg/types/anthropic.go`, `internal/transformer/stream.go`)
+- **Problem**: When reasoning models (Qwen 3.8 Max, GLM 5.3, DeepSeek) stream reasoning tokens (`delta.reasoning` / `delta.reasoning_content`), `ogc` previously merged reasoning deltas into regular `text_delta` blocks. This caused raw internal chain-of-thought monologue (*"Wait, let me reconsider...", "Hmm, actually..."*) to dump directly onto the terminal as visible chat text, confusing the user and re-injecting internal thoughts back into the conversation history on subsequent turns.
+- **Fix**:
+  - Implemented stateful `emitThinking` in `streamSession` that emits proper `content_block_start` with `type: "thinking"` and `thinking_delta` events.
+  - Automatically closes thinking blocks before regular text or tool call blocks begin.
+  - Claude Code now cleanly captures raw reasoning inside its native collapsible thinking spinner, keeping visible chat and conversation history clean.
+
+### 9. OpenCode Go Session Routing and Identification (`internal/client/opencode.go`, `internal/handlers/messages.go`)
+- **Problem**: OpenCode Go introduced an upstream requirement enforcing `x-opencode-session` header routing (`MissingSessionID: Request is missing x-opencode-session and cannot be routed efficiently`) and agent client identification. Missing these headers triggered immediate `HTTP 400` errors.
+- **Fix**:
+  - Automatically identifies client upstream via `User-Agent: ogc/1.0 (Claude Code)`.
+  - Captures incoming session IDs or deterministically derives a stable conversation session hash from message context, injecting `x-opencode-session` on both OpenAI and Anthropic upstream endpoints.
+

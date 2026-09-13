@@ -114,6 +114,17 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	sessionID := r.Header.Get("x-opencode-session")
+	if sessionID == "" {
+		sessionID = r.Header.Get("x-session-id")
+	}
+	if sessionID == "" {
+		sessionID = r.Header.Get("session-id")
+	}
+	if sessionID != "" {
+		r = r.WithContext(context.WithValue(r.Context(), client.SessionIDContextKey, sessionID))
+	}
+
 	// Read the raw request body for debug logging
 	var rawBody json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&rawBody); err != nil {
@@ -248,7 +259,15 @@ func (h *MessagesHandler) handleStreaming(
 
 		// Create a fresh context with timeout for THIS attempt only.
 		// Don't use r.Context() directly - it gets canceled when Claude Code retries.
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		attemptTimeout := 5 * time.Minute
+		if h.config.Upstream.TimeoutMs > 0 {
+			attemptTimeout = time.Duration(h.config.Upstream.TimeoutMs) * time.Millisecond
+		}
+		baseCtx := context.Background()
+		if sID := clientCtx.Value(client.SessionIDContextKey); sID != nil {
+			baseCtx = context.WithValue(baseCtx, client.SessionIDContextKey, sID)
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, attemptTimeout)
 
 		if model.Provider == "anthropic" {
 			// For MiniMax models, send raw Anthropic request to Anthropic endpoint
@@ -290,8 +309,16 @@ func (h *MessagesHandler) handleStreaming(
 			continue
 		}
 
+		// Count input tokens for accurate message_start usage reporting
+		inputTokens := 0
+		if h.tokenCounter != nil {
+			if count, err := h.tokenCounter.CountRequest(anthropicReq); err == nil && count > 0 {
+				inputTokens = count
+			}
+		}
+
 		// Proxy the stream: transform OpenAI SSE → Anthropic SSE in real-time
-		if err := h.streamHandler.ProxyStream(sseWriter, streamBody, model.ModelID, clientCtx); err != nil {
+		if err := h.streamHandler.ProxyStream(sseWriter, streamBody, model.ModelID, clientCtx, inputTokens); err != nil {
 			streamBody.Close()
 			cancel()
 			if err == transformer.ErrClientDisconnected || clientCtx.Err() == context.Canceled {
@@ -528,6 +555,12 @@ func (h *MessagesHandler) executeOpenAIRequest(
 	anthropicResp, err := h.responseTransformer.TransformResponse(openaiResp, model.ModelID)
 	if err != nil {
 		return nil, fmt.Errorf("response transform failed: %w", err)
+	}
+
+	if anthropicResp.Usage.InputTokens == 0 && h.tokenCounter != nil {
+		if count, err := h.tokenCounter.CountRequest(anthropicReq); err == nil && count > 0 {
+			anthropicResp.Usage.InputTokens = count
+		}
 	}
 
 	return json.Marshal(anthropicResp)

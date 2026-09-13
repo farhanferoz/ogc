@@ -4,6 +4,8 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +16,39 @@ import (
 	"github.com/xynogen/ogc/internal/config"
 	"github.com/xynogen/ogc/pkg/types"
 )
+
+// SessionIDContextKey is the context key used to pass a custom session ID.
+type contextKey string
+
+const SessionIDContextKey contextKey = "x-opencode-session"
+
+func getSessionID(ctx context.Context, messages []types.ChatMessage, body []byte) string {
+	if ctx != nil {
+		if val, ok := ctx.Value(SessionIDContextKey).(string); ok && val != "" {
+			return val
+		}
+		if val, ok := ctx.Value("x-opencode-session").(string); ok && val != "" {
+			return val
+		}
+	}
+	if len(messages) > 0 {
+		h := sha256.Sum256([]byte(messages[0].Content))
+		return "ogc-" + hex.EncodeToString(h[:12])
+	}
+	if len(body) > 0 {
+		var m struct {
+			Messages []struct {
+				Content interface{} `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(body, &m); err == nil && len(m.Messages) > 0 {
+			b, _ := json.Marshal(m.Messages[0].Content)
+			h := sha256.Sum256(b)
+			return "ogc-" + hex.EncodeToString(h[:12])
+		}
+	}
+	return fmt.Sprintf("ogc-%d", time.Now().UnixNano())
+}
 
 // Client handles communication with upstream API.
 type Client struct {
@@ -82,6 +117,8 @@ func (c *Client) ChatCompletion(
 	// Set headers
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+endpoint.APIKey)
+	httpReq.Header.Set("User-Agent", "ogc/1.0 (Claude Code)")
+	httpReq.Header.Set("x-opencode-session", getSessionID(ctx, req.Messages, nil))
 
 	// Add streaming header if requested
 	if req.Stream != nil && *req.Stream {
@@ -179,6 +216,8 @@ func (c *Client) SendAnthropicRequest(
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-api-key", endpoint.APIKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	httpReq.Header.Set("User-Agent", "ogc/1.0 (Claude Code)")
+	httpReq.Header.Set("x-opencode-session", getSessionID(ctx, nil, body))
 
 	// Add streaming header if requested
 	if stream {

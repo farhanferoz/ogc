@@ -36,6 +36,9 @@ func (t *RequestTransformer) TransformRequest(
 		Messages: messages,
 		Stream:   anthropicReq.Stream,
 	}
+	if anthropicReq.Stream != nil && *anthropicReq.Stream {
+		openaiReq.StreamOptions = &types.StreamOptions{IncludeUsage: true}
+	}
 
 	// Copy optional parameters from Anthropic request
 	if anthropicReq.Temperature != nil {

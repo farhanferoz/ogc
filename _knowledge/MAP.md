@@ -29,11 +29,11 @@ backends and is opted into per launch. Four regions, three outside `~/dev`.
 | Aliases | `/home/ff235/.bashrc.d/yolo-aliases.sh` (lines 7-10) |
 | Statusline context display | `/home/ff235/.claude/statusline-command.sh` |
 | Architecture + setup | `/home/ff235/dev/opencode/GUIDE.md` |
-| The six local patches | `/home/ff235/dev/opencode/PATCHES.md` |
+| The eight local patches | `/home/ff235/dev/opencode/PATCHES.md` |
 
 Functions in `claude-overrides.sh`: `_ccage_pre_exec_hook` (the routing
 opt-in), `_opencode_select_model`, `_opencode_select_effort`,
-`_opencode_model_context_limit`, `opencode-claude`.
+`_opencode_model_context_limit`, `opencode-claude`, `opencode-ccage-auto`.
 
 Run / inspect:
 

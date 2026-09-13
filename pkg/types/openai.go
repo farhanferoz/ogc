@@ -6,17 +6,23 @@ import "encoding/json"
 // OpenAI API types for the Chat Completions API.
 // Reference: https://platform.openai.com/docs/api-reference/chat
 
+// StreamOptions represents stream options for Chat Completions.
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
+}
+
 // ChatCompletionRequest represents a request to the OpenAI Chat Completions API.
 type ChatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Stream      *bool         `json:"stream,omitempty"`
-	Temperature *float64      `json:"temperature,omitempty"`
-	TopP        *float64      `json:"top_p,omitempty"`
-	MaxTokens   *int          `json:"max_tokens,omitempty"`
-	Tools       []ToolDef     `json:"tools,omitempty"`
-	ToolChoice  interface{}   `json:"tool_choice,omitempty"`
-	Stop        interface{}   `json:"stop,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []ChatMessage  `json:"messages"`
+	Stream        *bool          `json:"stream,omitempty"`
+	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+	Temperature   *float64       `json:"temperature,omitempty"`
+	TopP          *float64       `json:"top_p,omitempty"`
+	MaxTokens     *int           `json:"max_tokens,omitempty"`
+	Tools         []ToolDef      `json:"tools,omitempty"`
+	ToolChoice    interface{}    `json:"tool_choice,omitempty"`
+	Stop          interface{}    `json:"stop,omitempty"`
 }
 
 // ChatMessage represents a single message in the conversation.

@@ -54,11 +54,44 @@ data: [DONE]
 	if !strings.Contains(out, `"text":"4"`) {
 		t.Errorf("missing text delta in output: %s", out)
 	}
+	if !strings.Contains(out, `"type":"signature_delta"`) {
+		t.Errorf("missing signature_delta in output: %s", out)
+	}
+	if !strings.Contains(out, `"signature":"proxy-thinking-placeholder"`) {
+		t.Errorf("missing placeholder signature in output: %s", out)
+	}
 	if !strings.Contains(out, "content_block_stop") {
 		t.Errorf("missing content_block_stop in output: %s", out)
 	}
 	if !strings.Contains(out, "message_stop") {
 		t.Errorf("missing message_stop in output: %s", out)
+	}
+}
+
+func TestProxyStream_ReasoningOnlyEmitsVisibleFallbackText(t *testing.T) {
+	handler := NewStreamHandler()
+
+	sseData := `data: {"id":"1","choices":[{"delta":{"reasoning_content":"Thinking silently..."}}]}
+
+data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+`
+	body := io.NopCloser(strings.NewReader(sseData))
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	writer := NewSSEWriter(rec)
+
+	err := handler.ProxyStream(writer, body, "deepseek-v4-flash", context.Background(), 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	out := rec.Body.String()
+	if !strings.Contains(out, `"type":"signature_delta"`) {
+		t.Errorf("missing signature_delta in reasoning-only output: %s", out)
+	}
+	if !strings.Contains(out, `"type":"text"`) {
+		t.Errorf("missing fallback text block in reasoning-only output: %s", out)
 	}
 }
 

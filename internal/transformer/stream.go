@@ -172,14 +172,26 @@ func (s *streamSession) emitThinking(thinking string) error {
 	return nil
 }
 
-func (s *streamSession) emitText(text string) error {
-	if text == "" {
-		return nil
-	}
+const thinkingSignaturePlaceholder = "proxy-thinking-placeholder"
 
-	// Close thinking block if open before text begins
+func (s *streamSession) closeThinking() error {
 	if s.thinkingStarted && !s.thinkingClosed {
 		s.thinkingClosed = true
+		// Emit signature_delta before content_block_stop.
+		// Anthropic extended-thinking protocol strictly requires a signature_delta
+		// before content_block_stop; otherwise Claude Code discards the entire thinking
+		// block, reporting "no visible output".
+		sigEvent := types.MessageEvent{
+			Type:  "content_block_delta",
+			Index: &s.thinkingIndex,
+			Delta: &types.Delta{
+				Type:      "signature_delta",
+				Signature: thinkingSignaturePlaceholder,
+			},
+		}
+		if err := s.writer.WriteEvent(sigEvent); err != nil {
+			return ErrClientDisconnected
+		}
 		stopEvent := types.MessageEvent{
 			Type:  "content_block_stop",
 			Index: &s.thinkingIndex,
@@ -187,6 +199,18 @@ func (s *streamSession) emitText(text string) error {
 		if err := s.writer.WriteEvent(stopEvent); err != nil {
 			return ErrClientDisconnected
 		}
+	}
+	return nil
+}
+
+func (s *streamSession) emitText(text string) error {
+	if text == "" {
+		return nil
+	}
+
+	// Close thinking block if open before text begins
+	if err := s.closeThinking(); err != nil {
+		return err
 	}
 
 	if !s.textStarted {
@@ -224,15 +248,8 @@ func (s *streamSession) emitText(text string) error {
 
 func (s *streamSession) emitToolCallChunk(tc types.ToolCall, openaiIndex int) error {
 	// Close thinking block if open before tool use begins
-	if s.thinkingStarted && !s.thinkingClosed {
-		s.thinkingClosed = true
-		stopEvent := types.MessageEvent{
-			Type:  "content_block_stop",
-			Index: &s.thinkingIndex,
-		}
-		if err := s.writer.WriteEvent(stopEvent); err != nil {
-			return ErrClientDisconnected
-		}
+	if err := s.closeThinking(); err != nil {
+		return err
 	}
 
 	// If text block is still open, close it before tool use begins
@@ -305,15 +322,8 @@ func (s *streamSession) close(finishReason string, usage *types.UsageInfo) error
 	s.closed = true
 
 	// Close thinking block if open
-	if s.thinkingStarted && !s.thinkingClosed {
-		s.thinkingClosed = true
-		stopEvent := types.MessageEvent{
-			Type:  "content_block_stop",
-			Index: &s.thinkingIndex,
-		}
-		if err := s.writer.WriteEvent(stopEvent); err != nil {
-			return ErrClientDisconnected
-		}
+	if err := s.closeThinking(); err != nil {
+		return err
 	}
 
 	// Close text block if open
@@ -334,6 +344,33 @@ func (s *streamSession) close(finishReason string, usage *types.UsageInfo) error
 		stopEvent := types.MessageEvent{
 			Type:  "content_block_stop",
 			Index: &ts.contentIndex,
+		}
+		if err := s.writer.WriteEvent(stopEvent); err != nil {
+			return ErrClientDisconnected
+		}
+	}
+
+	// If no text was emitted and no tool calls occurred, ensure at least one visible
+	// text block exists so Claude Code does not treat the turn as empty output.
+	if !s.textStarted && len(s.seenToolIndices) == 0 {
+		s.textStarted = true
+		s.textClosed = true
+		textIdx := s.nextIndex
+		s.nextIndex++
+		startEvent := types.MessageEvent{
+			Type:  "content_block_start",
+			Index: &textIdx,
+			ContentBlock: &types.ContentBlock{
+				Type: "text",
+				Text: "",
+			},
+		}
+		if err := s.writer.WriteEvent(startEvent); err != nil {
+			return ErrClientDisconnected
+		}
+		stopEvent := types.MessageEvent{
+			Type:  "content_block_stop",
+			Index: &textIdx,
 		}
 		if err := s.writer.WriteEvent(stopEvent); err != nil {
 			return ErrClientDisconnected

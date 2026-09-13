@@ -44,7 +44,8 @@ This local build of `ogc` includes critical fixes for high-reliability Claude Co
 - **Problem**: When reasoning models (Qwen 3.8 Max, GLM 5.3, DeepSeek) stream reasoning tokens (`delta.reasoning` / `delta.reasoning_content`), `ogc` previously merged reasoning deltas into regular `text_delta` blocks. This caused raw internal chain-of-thought monologue (*"Wait, let me reconsider...", "Hmm, actually..."*) to dump directly onto the terminal as visible chat text, confusing the user and re-injecting internal thoughts back into the conversation history on subsequent turns.
 - **Fix**:
   - Implemented stateful `emitThinking` in `streamSession` that emits proper `content_block_start` with `type: "thinking"` and `thinking_delta` events.
-  - Automatically closes thinking blocks before regular text or tool call blocks begin.
+  - Emits mandatory `signature_delta` (`proxy-thinking-placeholder`) before `content_block_stop` as required by Anthropic's extended-thinking protocol, preventing Claude Code from discarding the block and reporting "no visible output".
+  - Automatically closes thinking blocks before regular text or tool call blocks begin, and ensures a visible text block exists on turn close.
   - Claude Code now cleanly captures raw reasoning inside its native collapsible thinking spinner, keeping visible chat and conversation history clean.
 
 ### 9. OpenCode Go Session Routing and Identification (`internal/client/opencode.go`, `internal/handlers/messages.go`)

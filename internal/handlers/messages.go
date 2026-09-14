@@ -253,6 +253,13 @@ func (h *MessagesHandler) handleStreaming(
 		default:
 		}
 
+		// A failed attempt that already sent part of a message cannot fall back on this
+		// stream: the next model would start a second message after the partial one.
+		if sseWriter.Started() {
+			h.logger.Warn("not trying fallback models: partial response already sent")
+			break
+		}
+
 		h.logger.Info("attempting streaming model", "model", model.ModelID)
 
 		// Create a fresh context with timeout for THIS attempt only.

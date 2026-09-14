@@ -61,6 +61,7 @@ This local build of `ogc` includes critical fixes for high-reliability Claude Co
   - The passthrough relay writes whole SSE events through `SSEWriter`. It previously `io.Copy`'d straight to the socket while the heartbeat goroutine wrote pings, so a ping could split an upstream event.
   - A relayed stream that ends before `message_stop`, or a translated stream that ends without `finish_reason` or carries an `error` object, now surfaces as an error event instead of an empty completed message.
   - Non-streaming passthrough keeps `signature_delta`, and Claude Code's `X-Claude-Code-Session-Id` is forwarded as the OpenCode session.
+  - A streaming attempt that fails after part of a message reached the client is not retried on the next fallback model, which would have started a second message on the same stream; the client gets an error event instead. Failures before any message event still fall back.
 
 ### 11. Restarts No Longer Cut Off In-Flight Requests (`internal/server/server.go`)
 - **Problem**: Restarting `ogc` (`systemctl --user restart ogc`) killed any request still streaming. `http.Server.Shutdown` makes `ListenAndServe` return at once, so `Start` returned and the process exited while the shutdown goroutine was still waiting for requests to finish; the 10 s drain never took effect.

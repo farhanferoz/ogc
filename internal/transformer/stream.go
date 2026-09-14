@@ -25,6 +25,7 @@ type SSEWriter struct {
 	flusher http.Flusher
 	mu      sync.Mutex
 	closed  bool
+	started bool // an event other than a ping has been written
 }
 
 // NewSSEWriter creates a new synchronized SSE writer.
@@ -53,11 +54,21 @@ func (s *SSEWriter) WriteEvent(event types.MessageEvent) error {
 	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event.Type, string(data)); err != nil {
 		return ErrClientDisconnected
 	}
+	if event.Type != "ping" {
+		s.started = true
+	}
 
 	if s.flusher != nil {
 		s.flusher.Flush()
 	}
 	return nil
+}
+
+// Started reports whether any event other than a ping has been written.
+func (s *SSEWriter) Started() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.started
 }
 
 // Ping sends an SSE ping event to keep the connection alive.
@@ -76,6 +87,7 @@ func (s *SSEWriter) WriteRaw(b []byte) error {
 	if _, err := s.w.Write(b); err != nil {
 		return ErrClientDisconnected
 	}
+	s.started = true
 	if s.flusher != nil {
 		s.flusher.Flush()
 	}

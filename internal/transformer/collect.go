@@ -79,6 +79,7 @@ func CollectAnthropicStream(body io.ReadCloser) (*types.MessageResponse, error) 
 					Type        string `json:"type"`
 					Text        string `json:"text"`
 					Thinking    string `json:"thinking"`
+					Signature   string `json:"signature"`
 					PartialJSON string `json:"partial_json"`
 				} `json:"delta"`
 			}
@@ -88,6 +89,9 @@ func CollectAnthropicStream(body io.ReadCloser) (*types.MessageResponse, error) 
 					accs[e.Index].text.WriteString(e.Delta.Text)
 				case "thinking_delta":
 					accs[e.Index].thinking.WriteString(e.Delta.Thinking)
+				case "signature_delta":
+					// The upstream needs this signature back to restore the model's reasoning.
+					blocks[e.Index].Signature = e.Delta.Signature
 				case "input_json_delta":
 					accs[e.Index].inputJSON.WriteString(e.Delta.PartialJSON)
 				}

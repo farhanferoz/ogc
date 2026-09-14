@@ -2,6 +2,7 @@
 package transformer
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -64,11 +65,67 @@ func (s *SSEWriter) Ping() error {
 	return s.WriteEvent(types.MessageEvent{Type: "ping"})
 }
 
+// WriteRaw thread-safely writes pre-formatted SSE bytes.
+func (s *SSEWriter) WriteRaw(b []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return ErrClientDisconnected
+	}
+	if _, err := s.w.Write(b); err != nil {
+		return ErrClientDisconnected
+	}
+	if s.flusher != nil {
+		s.flusher.Flush()
+	}
+	return nil
+}
+
 // Close marks the SSE writer as closed.
 func (s *SSEWriter) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
+}
+
+// RelayAnthropicStream forwards an upstream Anthropic-format SSE stream unchanged.
+// Events are written whole (through their terminating blank line) so heartbeat pings
+// sharing the SSEWriter can never land inside a half-written event. A stream that ends
+// before message_stop is an error, not a complete message.
+func RelayAnthropicStream(sseWriter *SSEWriter, upstream io.Reader) error {
+	reader := bufio.NewReader(upstream)
+	var event bytes.Buffer
+	sawStop := false
+
+	for {
+		line, err := reader.ReadBytes('\n')
+		event.Write(line)
+		if bytes.HasPrefix(line, []byte("event: message_stop")) ||
+			bytes.HasPrefix(line, []byte(`data: {"type":"message_stop"`)) {
+			sawStop = true
+		}
+
+		atBoundary := len(bytes.TrimSpace(line)) == 0 && event.Len() > len(line)
+		if atBoundary || (err != nil && event.Len() > 0) {
+			if werr := sseWriter.WriteRaw(event.Bytes()); werr != nil {
+				return werr
+			}
+			event.Reset()
+		}
+
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read upstream stream: %w", err)
+		}
+	}
+
+	if !sawStop {
+		return fmt.Errorf("upstream stream ended before message_stop")
+	}
+	return nil
 }
 
 // StreamHandler handles streaming SSE transformation from OpenAI to Anthropic format.
@@ -177,10 +234,8 @@ const thinkingSignaturePlaceholder = "proxy-thinking-placeholder"
 func (s *streamSession) closeThinking() error {
 	if s.thinkingStarted && !s.thinkingClosed {
 		s.thinkingClosed = true
-		// Emit signature_delta before content_block_stop.
-		// Anthropic extended-thinking protocol strictly requires a signature_delta
-		// before content_block_stop; otherwise Claude Code discards the entire thinking
-		// block, reporting "no visible output".
+		// Anthropic thinking blocks end with a signature_delta before content_block_stop.
+		// OpenAI-format upstreams have no signature, so emit a placeholder.
 		sigEvent := types.MessageEvent{
 			Type:  "content_block_delta",
 			Index: &s.thinkingIndex,
@@ -468,6 +523,11 @@ func (h *StreamHandler) ProxyStream(
 		}
 	}
 
+	if lastFinishReason == "" {
+		// Closing a cut-off stream normally would hand Claude Code an empty message
+		// that looks complete; surface it as an error instead.
+		return fmt.Errorf("upstream stream ended without a finish_reason")
+	}
 	return session.close(lastFinishReason, lastUsage)
 }
 
@@ -490,6 +550,9 @@ func (h *StreamHandler) processSSELine(
 	var chunk types.ChatCompletionChunk
 	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 		return nil
+	}
+	if len(chunk.Error) > 0 {
+		return fmt.Errorf("upstream stream error: %s", chunk.Error)
 	}
 
 	if chunk.Usage != nil {

@@ -81,24 +81,24 @@ The integration uses a high-performance local proxy daemon (`ogc`) running on `h
      "host": "127.0.0.1",
      "port": 3456,
      "models": {
-       "qwen3.8-max": { "provider": "openai", "model_id": "qwen3.8-max", "temperature": 0.7, "max_tokens": 65536 },
-       "qwen3.7-max": { "provider": "openai", "model_id": "qwen3.7-max", "temperature": 0.7, "max_tokens": 65536 },
-       "qwen3.7-plus": { "provider": "openai", "model_id": "qwen3.7-plus", "temperature": 0.7, "max_tokens": 65536 },
-       "qwen3.6-plus": { "provider": "openai", "model_id": "qwen3.6-plus", "temperature": 0.7, "max_tokens": 65536 },
+       "qwen3.8-max": { "provider": "anthropic", "model_id": "qwen3.8-max", "temperature": 0.7, "max_tokens": 65536 },
+       "qwen3.7-max": { "provider": "anthropic", "model_id": "qwen3.7-max", "temperature": 0.7, "max_tokens": 65536 },
+       "qwen3.7-plus": { "provider": "anthropic", "model_id": "qwen3.7-plus", "temperature": 0.7, "max_tokens": 65536 },
+       "qwen3.6-plus": { "provider": "anthropic", "model_id": "qwen3.6-plus", "temperature": 0.7, "max_tokens": 65536 },
        "qwen3.5-plus": { "provider": "openai", "model_id": "qwen3.5-plus", "temperature": 0.7, "max_tokens": 65536 },
-       "deepseek-v4-pro": { "provider": "openai", "model_id": "deepseek-v4-pro", "temperature": 0.7, "max_tokens": 65536 },
-       "deepseek-v4-flash": { "provider": "openai", "model_id": "deepseek-v4-flash", "temperature": 0.7, "max_tokens": 65536 },
+       "deepseek-v4-pro": { "provider": "anthropic", "model_id": "deepseek-v4-pro", "temperature": 0.7, "max_tokens": 65536 },
+       "deepseek-v4-flash": { "provider": "anthropic", "model_id": "deepseek-v4-flash", "temperature": 0.7, "max_tokens": 65536 },
        "glm-5.3": { "provider": "openai", "model_id": "glm-5.3", "temperature": 0.7, "max_tokens": 65536 },
        "glm-5.2": { "provider": "openai", "model_id": "glm-5.2", "temperature": 0.7, "max_tokens": 65536 },
        "glm-5.1": { "provider": "openai", "model_id": "glm-5.1", "temperature": 0.7, "max_tokens": 65536 },
        "glm-5": { "provider": "openai", "model_id": "glm-5", "temperature": 0.7, "max_tokens": 65536 },
-       "kimi-k3": { "provider": "openai", "model_id": "kimi-k3", "temperature": 0.7, "max_tokens": 65536 },
+       "kimi-k3": { "provider": "anthropic", "model_id": "kimi-k3", "temperature": 0.7, "max_tokens": 65536 },
        "kimi-k2.7-code": { "provider": "openai", "model_id": "kimi-k2.7-code", "temperature": 0.7, "max_tokens": 65536 },
        "kimi-k2.6": { "provider": "openai", "model_id": "kimi-k2.6", "temperature": 0.7, "max_tokens": 65536 },
        "kimi-k2.5": { "provider": "openai", "model_id": "kimi-k2.5", "temperature": 0.7, "max_tokens": 65536 },
-       "minimax-m3": { "provider": "openai", "model_id": "minimax-m3", "temperature": 0.7, "max_tokens": 65536 },
-       "minimax-m2.7": { "provider": "openai", "model_id": "minimax-m2.7", "temperature": 0.7, "max_tokens": 65536 },
-       "minimax-m2.5": { "provider": "openai", "model_id": "minimax-m2.5", "temperature": 0.7, "max_tokens": 65536 },
+       "minimax-m3": { "provider": "anthropic", "model_id": "minimax-m3", "temperature": 0.7, "max_tokens": 65536 },
+       "minimax-m2.7": { "provider": "anthropic", "model_id": "minimax-m2.7", "temperature": 0.7, "max_tokens": 65536 },
+       "minimax-m2.5": { "provider": "anthropic", "model_id": "minimax-m2.5", "temperature": 0.7, "max_tokens": 65536 },
        "mimo-v2.5-pro": { "provider": "openai", "model_id": "mimo-v2.5-pro", "temperature": 0.7, "max_tokens": 65536 },
        "mimo-v2.5": { "provider": "openai", "model_id": "mimo-v2.5", "temperature": 0.7, "max_tokens": 65536 },
        "mimo-v2-pro": { "provider": "openai", "model_id": "mimo-v2-pro", "temperature": 0.7, "max_tokens": 65536 },
@@ -119,6 +119,8 @@ The integration uses a high-performance local proxy daemon (`ogc`) running on `h
      }
    }
    ```
+
+   **Choosing `provider`.** Prefer `"anthropic"` whenever OpenCode Go serves the model on its Anthropic-format `/v1/messages` endpoint: requests pass through untouched, so thinking blocks, signatures and tool calls stay in Claude Code's native format. Use `"openai"` (translated via `/v1/chat/completions`) only for models that endpoint rejects. To check a model, send a streaming request with a tool to `https://opencode.ai/zen/go/v1/messages` using the `x-api-key` header: HTTP 200 with `thinking`/`tool_use` blocks means `"anthropic"`. The split above was probed on 2026-09-13 (see PATCHES.md §10).
 
 ---
 

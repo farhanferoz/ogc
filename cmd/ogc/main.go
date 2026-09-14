@@ -363,13 +363,13 @@ func getDefaultConfig() string {
   "port": 3456,
   "models": {
     "minimax-m2.7": {
-      "provider": "openai",
+      "provider": "anthropic",
       "model_id": "minimax-m2.7",
       "temperature": 0.7,
       "max_tokens": 65536
     },
     "minimax-m2.5": {
-      "provider": "openai",
+      "provider": "anthropic",
       "model_id": "minimax-m2.5",
       "temperature": 0.7,
       "max_tokens": 65536
@@ -382,10 +382,10 @@ func getDefaultConfig() string {
   },
   "fallbacks": {
     "minimax-m2.7": [
-      { "provider": "openai", "model_id": "minimax-m2.5" }
+      { "provider": "anthropic", "model_id": "minimax-m2.5" }
     ],
     "minimax-m2.5": [
-      { "provider": "openai", "model_id": "minimax-m2.7" }
+      { "provider": "anthropic", "model_id": "minimax-m2.7" }
     ]
   },
   "upstream": {

@@ -27,13 +27,13 @@ type ChatCompletionRequest struct {
 
 // ChatMessage represents a single message in the conversation.
 type ChatMessage struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	Reasoning        string     `json:"reasoning,omitempty"`          // extended-thinking models (Kimi, DeepSeek R1)
-	ReasoningContent string     `json:"reasoning_content,omitempty"`  // extended-thinking models (GLM, DeepSeek)
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content,omitempty"`
+	Reasoning        string     `json:"reasoning,omitempty"`         // extended-thinking models (Kimi, DeepSeek R1)
+	ReasoningContent string     `json:"reasoning_content,omitempty"` // extended-thinking models (GLM, DeepSeek)
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	Name             string     `json:"name,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
 // ToolCall represents a function call made by the model.
@@ -90,12 +90,13 @@ type UsageInfo struct {
 
 // ChatCompletionChunk represents a streaming chunk from the Chat Completions API.
 type ChatCompletionChunk struct {
-	ID      string     `json:"id"`
-	Object  string     `json:"object"`
-	Created int64      `json:"created"`
-	Model   string     `json:"model"`
-	Choices []Choice   `json:"choices"`
-	Usage   *UsageInfo `json:"usage,omitempty"`
+	ID      string          `json:"id"`
+	Object  string          `json:"object"`
+	Created int64           `json:"created"`
+	Model   string          `json:"model"`
+	Choices []Choice        `json:"choices"`
+	Usage   *UsageInfo      `json:"usage,omitempty"`
+	Error   json.RawMessage `json:"error,omitempty"` // set when the upstream fails mid-stream
 }
 
 // ErrorResponse represents an error response from the OpenAI API.

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -115,6 +114,9 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	sessionID := r.Header.Get("x-opencode-session")
+	if sessionID == "" {
+		sessionID = r.Header.Get("X-Claude-Code-Session-Id")
+	}
 	if sessionID == "" {
 		sessionID = r.Header.Get("x-session-id")
 	}
@@ -272,7 +274,7 @@ func (h *MessagesHandler) handleStreaming(
 		if model.Provider == "anthropic" {
 			// For MiniMax models, send raw Anthropic request to Anthropic endpoint
 			modelBody := replaceModelInRawBody(rawBody, model.ModelID)
-			if err := h.handleAnthropicStreaming(ctx, rw, modelBody, model.ModelID); err != nil {
+			if err := h.handleAnthropicStreaming(ctx, sseWriter, modelBody, model.ModelID); err != nil {
 				cancel()
 				if clientCtx.Err() == context.Canceled {
 					h.logger.Info("client disconnected during anthropic stream")
@@ -416,7 +418,7 @@ func min(a, b int) int {
 // handleAnthropicStreaming sends a raw Anthropic request to the Anthropic endpoint.
 func (h *MessagesHandler) handleAnthropicStreaming(
 	ctx context.Context,
-	w http.ResponseWriter,
+	sseWriter *transformer.SSEWriter,
 	rawBody json.RawMessage,
 	modelID string,
 ) error {
@@ -433,16 +435,13 @@ func (h *MessagesHandler) handleAnthropicStreaming(
 	}
 	defer resp.Body.Close()
 
-	// Copy the response directly (already in Anthropic format)
-	// SSE headers already set by handleStreaming
-	// Use io.Copy which handles streaming efficiently
-	_, err = io.Copy(w, resp.Body)
-	if err != nil {
-		// Check if this was a client disconnect
+	// Response is already in Anthropic format. Relay it through the SSE writer rather
+	// than copying to the ResponseWriter, so heartbeat pings stay serialized with it.
+	if err := transformer.RelayAnthropicStream(sseWriter, resp.Body); err != nil {
 		if ctx.Err() == context.Canceled {
 			return transformer.ErrClientDisconnected
 		}
-		return fmt.Errorf("failed to copy response: %w", err)
+		return err
 	}
 
 	return nil

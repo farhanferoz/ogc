@@ -44,7 +44,7 @@ This local build of `ogc` includes critical fixes for high-reliability Claude Co
 - **Problem**: When reasoning models (Qwen 3.8 Max, GLM 5.3, DeepSeek) stream reasoning tokens (`delta.reasoning` / `delta.reasoning_content`), `ogc` previously merged reasoning deltas into regular `text_delta` blocks. This caused raw internal chain-of-thought monologue (*"Wait, let me reconsider...", "Hmm, actually..."*) to dump directly onto the terminal as visible chat text, confusing the user and re-injecting internal thoughts back into the conversation history on subsequent turns.
 - **Fix**:
   - Implemented stateful `emitThinking` in `streamSession` that emits proper `content_block_start` with `type: "thinking"` and `thinking_delta` events.
-  - Emits mandatory `signature_delta` (`proxy-thinking-placeholder`) before `content_block_stop` as required by Anthropic's extended-thinking protocol, preventing Claude Code from discarding the block and reporting "no visible output".
+  - Emits a `signature_delta` (`proxy-thinking-placeholder`) before `content_block_stop` to match Anthropic's thinking-block event shape. (An earlier version of this note said Claude Code discards unsigned thinking blocks and reports "no visible output"; session transcripts show unsigned thinking blocks recorded normally, so that was not the cause — see §10.)
   - Automatically closes thinking blocks before regular text or tool call blocks begin, and ensures a visible text block exists on turn close.
   - Claude Code now cleanly captures raw reasoning inside its native collapsible thinking spinner, keeping visible chat and conversation history clean.
 
@@ -53,4 +53,12 @@ This local build of `ogc` includes critical fixes for high-reliability Claude Co
 - **Fix**:
   - Automatically identifies client upstream via `User-Agent: ogc/1.0 (Claude Code)`.
   - Captures incoming session IDs or deterministically derives a stable conversation session hash from message context, injecting `x-opencode-session` on both OpenAI and Anthropic upstream endpoints.
+
+### 10. Native `/v1/messages` Passthrough and No More Silent Empty Turns (`internal/transformer/stream.go`, `internal/transformer/collect.go`, `internal/handlers/messages.go`, `pkg/types/openai.go`, config)
+- **Problem**: Claude Code turns ended with nothing on screen (`[Your previous response had no visible output…]`) while `ogc` logged `streaming completed`. Every model was routed through OpenAI translation, which rebuilds Anthropic blocks from chat-completion chunks and closed any stream that simply ended — including one with no `finish_reason` or one carrying an `error` object — as a normal, empty message. The raw upstream bytes of the failing turns were not logged, so which of those translation failure modes fired is not pinned down.
+- **Fix**:
+  - OpenCode Go serves many models on its Anthropic-format `/v1/messages` endpoint — Claude Code's own protocol, with real thinking signatures handled upstream. Those models are configured `"provider": "anthropic"` and relayed unchanged. Probed 2026-09-13 with a streaming tool request: deepseek-v4-flash, deepseek-v4-pro, kimi-k3, minimax-m2.5/m2.7/m3, qwen3.6-plus/3.7-plus/3.7-max/3.8-max work natively (a follow-up turn sending back signed, unsigned or placeholder-signed thinking blocks is accepted). glm-*, kimi-k2.x, mimo-*, hy3 return HTTP 500 there and stay on `"openai"`.
+  - The passthrough relay writes whole SSE events through `SSEWriter`. It previously `io.Copy`'d straight to the socket while the heartbeat goroutine wrote pings, so a ping could split an upstream event.
+  - A relayed stream that ends before `message_stop`, or a translated stream that ends without `finish_reason` or carries an `error` object, now surfaces as an error event instead of an empty completed message.
+  - Non-streaming passthrough keeps `signature_delta`, and Claude Code's `X-Claude-Code-Session-Id` is forwarded as the OpenCode session.
 

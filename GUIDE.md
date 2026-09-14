@@ -228,6 +228,22 @@ _opencode_select_model() {
     return 1
 }
 
+# Every subagent tier follows the launch model. ogc maps exact model names only,
+# so an agent pinned to `model: haiku`, `sonnet` or `opus` otherwise fails with
+# "500 no model mapping found". A tier variable already exported wins, so one
+# tier can still be sent elsewhere on purpose. Call it only inside the launch
+# subshell: a value leaked into the terminal would pass for a deliberate
+# override at the next launch and pin the previous model.
+_opencode_export_tiers() {
+    local v
+    [ -n "$1" ] || return 0
+    for v in ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
+             ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_FABLE_MODEL \
+             ANTHROPIC_SMALL_FAST_MODEL; do
+        [ -n "${!v:-}" ] || export "$v=$1"
+    done
+}
+
 # Main wrapper
 opencode-claude() {
     local extra_flags=()
@@ -256,7 +272,8 @@ opencode-claude() {
     ctx_limit=$(_opencode_model_context_limit "$model_name")
     export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$ctx_limit"
 
-    OPENCODE=1 claude "${extra_flags[@]}" "$@"
+    ( _opencode_export_tiers "$model_name"
+      OPENCODE=1 claude "${extra_flags[@]}" "$@" )
 }
 
 # ccage-auto autonomous context-managed wrapper
@@ -265,7 +282,8 @@ opencode-ccage-auto() {
     local OPENCODE_PREPARED_CTX=""
     local OPENCODE_PREPARED_FLAGS=()
     _opencode_prepare_args "$@" || return $?
-    OPENCODE=1 ccage-auto --window "$OPENCODE_PREPARED_CTX" "${OPENCODE_PREPARED_FLAGS[@]}" "$@"
+    ( _opencode_export_tiers "$OPENCODE_PREPARED_MODEL"
+      OPENCODE=1 ccage-auto --window "$OPENCODE_PREPARED_CTX" "${OPENCODE_PREPARED_FLAGS[@]}" "$@" )
 }
 
 alias opencode-ccage-yolo="opencode-claude --dangerously-skip-permissions"

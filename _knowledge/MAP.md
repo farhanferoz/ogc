@@ -33,7 +33,16 @@ backends and is opted into per launch. Four regions, three outside `~/dev`.
 
 Functions in `claude-overrides.sh`: `_ccage_pre_exec_hook` (the routing
 opt-in), `_opencode_select_model`, `_opencode_select_effort`,
-`_opencode_model_context_limit`, `opencode-claude`, `opencode-ccage-auto`.
+`_opencode_model_context_limit`, `_opencode_export_tiers`, `opencode-claude`,
+`opencode-ccage-auto`.
+
+**Subagent tiers need no entry in `config.json`.** Both launchers run
+`_opencode_export_tiers` inside the launch subshell, which points
+`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` and
+`ANTHROPIC_SMALL_FAST_MODEL` at the launch model unless one is already exported.
+Checked 2026-09-14 on claude 2.1.270 with a headless `-p` run dispatching the
+`utility-worker` agent (`model: haiku`): without the variables its transcript
+shows `500 no model mapping found`; with them it runs on `deepseek-v4-flash`.
 
 Run / inspect:
 

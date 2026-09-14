@@ -62,3 +62,9 @@ This local build of `ogc` includes critical fixes for high-reliability Claude Co
   - A relayed stream that ends before `message_stop`, or a translated stream that ends without `finish_reason` or carries an `error` object, now surfaces as an error event instead of an empty completed message.
   - Non-streaming passthrough keeps `signature_delta`, and Claude Code's `X-Claude-Code-Session-Id` is forwarded as the OpenCode session.
 
+### 11. Restarts No Longer Cut Off In-Flight Requests (`internal/server/server.go`)
+- **Problem**: Restarting `ogc` (`systemctl --user restart ogc`) killed any request still streaming. `http.Server.Shutdown` makes `ListenAndServe` return at once, so `Start` returned and the process exited while the shutdown goroutine was still waiting for requests to finish; the 10 s drain never took effect.
+- **Fix**:
+  - `Start` waits for `Shutdown` to complete before returning.
+  - The drain limit is 40 s, below systemd's stop timeout (45 s on Fedora, 90 s on the DGX). In the Fedora logs for 2026-09-13/14, 10% of 441 streamed requests took over 10 s and 99% finished within 28 s.
+

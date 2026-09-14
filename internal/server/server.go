@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +19,11 @@ import (
 	"github.com/xynogen/ogc/internal/router"
 	"github.com/xynogen/ogc/internal/token"
 )
+
+// shutdownTimeout bounds how long a stop waits for in-flight requests to finish.
+// Keep it below systemd's TimeoutStopSec so the drain ends before the service
+// manager kills the process.
+const shutdownTimeout = 40 * time.Second
 
 // Server represents the proxy server.
 type Server struct {
@@ -91,15 +97,28 @@ func (s *Server) Start() error {
 		"anthropic_base_url", s.config.Upstream.AnthropicBaseURL,
 	)
 
+	ln, err := net.Listen("tcp", s.httpSrv.Addr)
+	if err != nil {
+		return fmt.Errorf("server failed: %w", err)
+	}
+
 	// Graceful shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	return s.serve(ctx, ln)
+}
+
+// serve handles requests on ln until ctx is done, then waits for in-flight
+// requests to finish (up to shutdownTimeout) before returning.
+func (s *Server) serve(ctx context.Context, ln net.Listener) error {
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		s.logger.Info("shutting down server...")
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 
 		if err := s.httpSrv.Shutdown(shutdownCtx); err != nil {
@@ -107,9 +126,13 @@ func (s *Server) Start() error {
 		}
 	}()
 
-	if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server failed: %w", err)
 	}
+
+	// Serve returns as soon as Shutdown begins. Returning before the drain
+	// finishes would exit the process and cut off requests still streaming.
+	<-shutdownDone
 
 	s.logger.Info("server stopped")
 	return nil

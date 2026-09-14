@@ -17,9 +17,12 @@ import (
 	"github.com/xynogen/ogc/pkg/types"
 )
 
-// SessionIDContextKey is the context key used to pass a custom session ID.
+// userAgent identifies ogc to the upstream.
+const userAgent = "ogc/1.0 (Claude Code)"
+
 type contextKey string
 
+// SessionIDContextKey is the context key used to pass a custom session ID.
 const SessionIDContextKey contextKey = "x-opencode-session"
 
 func getSessionID(ctx context.Context, messages []types.ChatMessage, body []byte) string {
@@ -27,13 +30,9 @@ func getSessionID(ctx context.Context, messages []types.ChatMessage, body []byte
 		if val, ok := ctx.Value(SessionIDContextKey).(string); ok && val != "" {
 			return val
 		}
-		if val, ok := ctx.Value("x-opencode-session").(string); ok && val != "" {
-			return val
-		}
 	}
 	if len(messages) > 0 {
-		h := sha256.Sum256([]byte(messages[0].Content))
-		return "ogc-" + hex.EncodeToString(h[:12])
+		return sessionHash([]byte(messages[0].Content))
 	}
 	if len(body) > 0 {
 		var m struct {
@@ -43,17 +42,22 @@ func getSessionID(ctx context.Context, messages []types.ChatMessage, body []byte
 		}
 		if err := json.Unmarshal(body, &m); err == nil && len(m.Messages) > 0 {
 			b, _ := json.Marshal(m.Messages[0].Content)
-			h := sha256.Sum256(b)
-			return "ogc-" + hex.EncodeToString(h[:12])
+			return sessionHash(b)
 		}
 	}
 	return fmt.Sprintf("ogc-%d", time.Now().UnixNano())
 }
 
+// sessionHash derives a stable session ID from a conversation's first message.
+func sessionHash(b []byte) string {
+	h := sha256.Sum256(b)
+	return "ogc-" + hex.EncodeToString(h[:12])
+}
+
 // Client handles communication with upstream API.
 type Client struct {
-	openAIConfig     EndpointConfig
-	anthropicConfig  EndpointConfig
+	openAIConfig    EndpointConfig
+	anthropicConfig EndpointConfig
 	httpClient      *http.Client
 }
 
@@ -65,10 +69,7 @@ type EndpointConfig struct {
 
 // NewClient creates a new upstream client.
 func NewClient(cfg config.UpstreamConfig, apiKey string) *Client {
-	timeout := time.Duration(cfg.TimeoutMs) * time.Millisecond
-	if timeout == 0 {
-		timeout = 5 * time.Minute
-	}
+	timeout := cfg.Timeout()
 
 	// Configure connection pooling for better performance
 	transport := &http.Transport{
@@ -117,7 +118,7 @@ func (c *Client) ChatCompletion(
 	// Set headers
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+endpoint.APIKey)
-	httpReq.Header.Set("User-Agent", "ogc/1.0 (Claude Code)")
+	httpReq.Header.Set("User-Agent", userAgent)
 	httpReq.Header.Set("x-opencode-session", getSessionID(ctx, req.Messages, nil))
 
 	// Add streaming header if requested
@@ -216,7 +217,7 @@ func (c *Client) SendAnthropicRequest(
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-api-key", endpoint.APIKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
-	httpReq.Header.Set("User-Agent", "ogc/1.0 (Claude Code)")
+	httpReq.Header.Set("User-Agent", userAgent)
 	httpReq.Header.Set("x-opencode-session", getSessionID(ctx, nil, body))
 
 	// Add streaming header if requested

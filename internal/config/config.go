@@ -1,6 +1,8 @@
 // Package config handles application configuration loading and validation.
 package config
 
+import "time"
+
 // Config holds the complete application configuration.
 type Config struct {
 	APIKey       string                   `json:"api_key"`
@@ -27,6 +29,14 @@ type UpstreamConfig struct {
 	BaseURL          string `json:"base_url"`
 	AnthropicBaseURL string `json:"anthropic_base_url"`
 	TimeoutMs        int    `json:"timeout_ms"`
+}
+
+// Timeout returns the upstream request timeout, defaulting to 5 minutes when unset.
+func (u UpstreamConfig) Timeout() time.Duration {
+	if u.TimeoutMs <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(u.TimeoutMs) * time.Millisecond
 }
 
 // LoggingConfig controls application logging behavior.

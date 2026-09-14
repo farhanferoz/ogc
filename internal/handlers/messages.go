@@ -113,15 +113,11 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	sessionID := r.Header.Get("x-opencode-session")
-	if sessionID == "" {
-		sessionID = r.Header.Get("X-Claude-Code-Session-Id")
-	}
-	if sessionID == "" {
-		sessionID = r.Header.Get("x-session-id")
-	}
-	if sessionID == "" {
-		sessionID = r.Header.Get("session-id")
+	var sessionID string
+	for _, header := range []string{"x-opencode-session", "X-Claude-Code-Session-Id", "x-session-id", "session-id"} {
+		if sessionID = r.Header.Get(header); sessionID != "" {
+			break
+		}
 	}
 	if sessionID != "" {
 		r = r.WithContext(context.WithValue(r.Context(), client.SessionIDContextKey, sessionID))
@@ -261,15 +257,11 @@ func (h *MessagesHandler) handleStreaming(
 
 		// Create a fresh context with timeout for THIS attempt only.
 		// Don't use r.Context() directly - it gets canceled when Claude Code retries.
-		attemptTimeout := 5 * time.Minute
-		if h.config.Upstream.TimeoutMs > 0 {
-			attemptTimeout = time.Duration(h.config.Upstream.TimeoutMs) * time.Millisecond
-		}
 		baseCtx := context.Background()
 		if sID := clientCtx.Value(client.SessionIDContextKey); sID != nil {
 			baseCtx = context.WithValue(baseCtx, client.SessionIDContextKey, sID)
 		}
-		ctx, cancel := context.WithTimeout(baseCtx, attemptTimeout)
+		ctx, cancel := context.WithTimeout(baseCtx, h.config.Upstream.Timeout())
 
 		if model.Provider == "anthropic" {
 			// For MiniMax models, send raw Anthropic request to Anthropic endpoint

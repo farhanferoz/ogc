@@ -67,48 +67,32 @@ func (c *Counter) CountRequest(req *types.MessageRequest) (int, error) {
 		return 0, nil
 	}
 
+	// CountTokens never returns an error.
+	count := func(s string) int {
+		n, _ := c.CountTokens(s)
+		return n
+	}
+
 	total := 3 // Base prompt overhead
 
-	sys := req.SystemText()
-	if sys != "" {
-		sysTokens, err := c.CountTokens(sys)
-		if err != nil {
-			return 0, err
-		}
-		total += sysTokens + 5
+	if sys := req.SystemText(); sys != "" {
+		total += count(sys) + 5
 	}
 
 	for _, msg := range req.Messages {
 		total += 3 // Message header overhead
-		blocks := msg.ContentBlocks()
-		for _, b := range blocks {
+		for _, b := range msg.ContentBlocks() {
 			switch b.Type {
 			case "text":
-				if b.Text != "" {
-					cnt, err := c.CountTokens(b.Text)
-					if err != nil {
-						return 0, err
-					}
-					total += cnt
-				}
+				total += count(b.Text)
 			case "tool_use":
-				nameCnt, _ := c.CountTokens(b.Name)
-				inputCnt, _ := c.CountTokens(string(b.Input))
-				total += nameCnt + inputCnt + 6
+				total += count(b.Name) + count(string(b.Input)) + 6
 			case "tool_result":
-				text := b.TextContent()
-				if text != "" {
-					cnt, err := c.CountTokens(text)
-					if err != nil {
-						return 0, err
-					}
-					total += cnt + 4
+				if text := b.TextContent(); text != "" {
+					total += count(text) + 4
 				}
 			case "thinking":
-				if b.Thinking != "" {
-					cnt, _ := c.CountTokens(b.Thinking)
-					total += cnt
-				}
+				total += count(b.Thinking)
 			case "image":
 				total += 85
 			}
@@ -116,10 +100,7 @@ func (c *Counter) CountRequest(req *types.MessageRequest) (int, error) {
 	}
 
 	for _, tool := range req.Tools {
-		nameCnt, _ := c.CountTokens(tool.Name)
-		descCnt, _ := c.CountTokens(tool.Description)
-		schemaCnt, _ := c.CountTokens(string(tool.InputSchema))
-		total += nameCnt + descCnt + schemaCnt + 12
+		total += count(tool.Name) + count(tool.Description) + count(string(tool.InputSchema)) + 12
 	}
 
 	return total, nil

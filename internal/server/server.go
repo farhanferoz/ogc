@@ -240,7 +240,9 @@ func (s *Server) Start() error {
 	defer stop()
 	s.modelRouter.StartCatalogRefresh(context.Background())
 
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		s.logger.Info("shutting down server...")
 
@@ -282,6 +284,13 @@ func (s *Server) Start() error {
 
 	if err := srvToStart.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server failed: %w", err)
+	}
+
+	// ListenAndServe returns as soon as Shutdown closes the listener, before
+	// in-flight requests finish. After a signal, wait for the drain: serve
+	// returns straight from Start, so returning early exits mid-stream.
+	if ctx.Err() != nil {
+		<-shutdownDone
 	}
 
 	s.logger.Info("server stopped")

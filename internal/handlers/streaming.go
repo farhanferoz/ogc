@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,13 @@ import (
 	"github.com/routatic/proxy/internal/core"
 	"github.com/routatic/proxy/internal/transformer"
 )
+
+// messageStopMarker is the text that identifies a message_stop event, whether
+// it appears in the "event: message_stop" line or the "data:" line. It is
+// searched for across raw upstream byte chunks, so a boundary window equal to
+// its own length minus one is carried from each chunk to the next in case the
+// marker straddles a chunk boundary.
+const messageStopMarker = "message_stop"
 
 // StreamProxy handles SSE stream forwarding from various upstream wire formats
 // to Anthropic-format SSE events. It wraps transformer.StreamHandler and
@@ -75,6 +83,8 @@ func (sp *StreamProxy) proxyAnthropicPassthroughStream(
 	defer cancel()
 
 	buf := make([]byte, 4096)
+	var tail []byte // trailing bytes from the previous chunk, for a marker split across chunks
+	sawStop := false
 	ping := transformer.StartIdleWatchdog(clientCtx, cancel, idleTimeout)
 	for {
 		select {
@@ -88,6 +98,16 @@ func (sp *StreamProxy) proxyAnthropicPassthroughStream(
 		n, rerr := body.Read(buf)
 		if n > 0 {
 			ping()
+			if !sawStop {
+				window := append(tail, buf[:n]...)
+				if bytes.Contains(window, []byte(messageStopMarker)) {
+					sawStop = true
+					tail = nil
+				} else {
+					keep := min(len(window), len(messageStopMarker)-1)
+					tail = append([]byte(nil), window[len(window)-keep:]...)
+				}
+			}
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return transformer.ErrClientDisconnected
 			}
@@ -96,6 +116,9 @@ func (sp *StreamProxy) proxyAnthropicPassthroughStream(
 			}
 		}
 		if rerr == io.EOF {
+			if !sawStop {
+				return fmt.Errorf("upstream stream ended before message_stop")
+			}
 			return nil
 		}
 		if rerr != nil {

@@ -119,19 +119,20 @@ func (sp *StreamProxy) proxyAnthropicPassthroughStream(
 		if len(line) > 0 {
 			ping()
 			event.Write(line)
-			if bytes.HasPrefix(line, []byte("event: message_stop")) ||
-				bytes.HasPrefix(line, []byte(`data: {"type":"message_stop"`)) {
-				sawStop = true
-			}
 		}
 
-		// A blank line is the SSE event boundary. Flush the whole event once
-		// we've reached it, or when the stream ends mid-event so nothing
-		// buffered is lost.
-		atBoundary := len(bytes.TrimSpace(line)) == 0 && event.Len() > len(line)
-		if atBoundary || (rerr != nil && event.Len() > 0) {
+		// Only an empty line ends an SSE event. The stream counts as finished
+		// once a whole message_stop event has been relayed; an event still
+		// unterminated at EOF is dropped, as SSE clients discard it, and the
+		// stream is reported as cut off.
+		atBoundary := (string(line) == "\n" || string(line) == "\r\n") && event.Len() > len(line)
+		if atBoundary {
+			isStop := isMessageStopEvent(event.Bytes())
 			if err := flushEvent(); err != nil {
 				return err
+			}
+			if isStop {
+				sawStop = true
 			}
 		}
 

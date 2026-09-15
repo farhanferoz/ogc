@@ -290,6 +290,12 @@ alias opencode-ccage-yolo="opencode-claude --dangerously-skip-permissions"
 alias opencode-ccage-auto-yolo="opencode-ccage-auto --dangerously-skip-permissions"
 ```
 
+**Keep Agent Teams off in OpenCode sessions.**
+- **With ccage:** both launchers end in ccage's `claude` wrapper, which runs `_ccage_pre_exec_hook` on every launch. With `OPENCODE=1`, that hook writes `"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"` into the session's `settings.json` `env`.
+- **Without ccage:** add the same entry to `settings.json` yourself. A shell export is not enough, because a settings-file `env` value overrides it.
+- **Why it matters:** with agent teams on, a named subagent runs as a teammate, and its result reaches the session only when the current turn ends. An autonomous session that keeps working may never receive it.
+- **Evidence:** measured 2026-09-15 on Claude Code 2.1.272 (`_knowledge/MAP.md`, `DECISIONS.md` D5).
+
 ---
 
 ### Step 2.5: Configure Status Line & Token Normalization

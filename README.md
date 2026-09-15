@@ -357,6 +357,30 @@ The proxy transforms OpenAI SSE to Anthropic SSE in real-time. If streaming appe
 2. Check that no proxy or firewall is buffering the connection
 3. Try a non-streaming request first to verify the model works
 
+### Subagents fail with "500 no model mapping found"
+
+A subagent pinned to `haiku`, `sonnet` or `opus` is sent with that tier's Claude model name, and ogc refuses a name it has no mapping for. Point every tier at the model you launch with, before starting Claude Code:
+
+```bash
+export ANTHROPIC_DEFAULT_OPUS_MODEL=<model> ANTHROPIC_DEFAULT_SONNET_MODEL=<model> \
+       ANTHROPIC_DEFAULT_HAIKU_MODEL=<model> ANTHROPIC_DEFAULT_FABLE_MODEL=<model> \
+       ANTHROPIC_SMALL_FAST_MODEL=<model>
+```
+
+### A subagent finishes but its result never reaches the session
+
+With `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, Claude Code launches a named subagent as an agent-team teammate. A teammate's result reaches the lead session only when the lead's current turn ends, so a session that keeps working in one long turn (an autonomous run, for example) may never receive it. Turn agent teams off in the session's `settings.json`:
+
+```json
+{ "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0" } }
+```
+
+A named subagent then runs as an ordinary subagent, and its result arrives as soon as it finishes, even mid-turn. Set it in `settings.json`, not as a shell export: a settings-file `env` value overrides a shell export.
+
+Measured 2026-09-15 on Claude Code 2.1.272 with DeepSeek V4 Flash, with the lead kept busy:
+- agent teams on: the result arrived about 2 minutes after the subagent finished, at the lead's turn end;
+- agent teams off: it arrived 4 seconds after launch.
+
 ### Debug Mode
 
 For maximum logging, run with debug level:

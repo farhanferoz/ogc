@@ -3,8 +3,6 @@ package gomodels
 import (
 	"strings"
 	"testing"
-
-	"github.com/routatic/proxy/internal/core"
 )
 
 const docsFixture = `# Go
@@ -36,9 +34,9 @@ func TestParseDocsTable_ReadsModelsAndWireFormats(t *testing.T) {
 		t.Fatalf("ParseDocsTable: %v", err)
 	}
 	want := []DocsModel{
-		{ID: "grok-4.6", Name: "Grok 4.6", WireFormat: core.WireFormatOpenAIResponses},
-		{ID: "glm-5.3", Name: "GLM-5.3", WireFormat: core.WireFormatOpenAIChat},
-		{ID: "minimax-m3", Name: "MiniMax M3", WireFormat: core.WireFormatAnthropic},
+		{ID: "grok-4.6", Name: "Grok 4.6", WireFormat: WireFormatResponses},
+		{ID: "glm-5.3", Name: "GLM-5.3", WireFormat: WireFormatOpenAI},
+		{ID: "minimax-m3", Name: "MiniMax M3", WireFormat: WireFormatAnthropic},
 	}
 	if len(models) != len(want) {
 		t.Fatalf("got %d models %+v, want %d", len(models), models, len(want))

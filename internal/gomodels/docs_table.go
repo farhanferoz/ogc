@@ -7,8 +7,6 @@ import (
 	"bufio"
 	"fmt"
 	"strings"
-
-	"github.com/routatic/proxy/internal/core"
 )
 
 // DocsModel is one row of the "Endpoints" table in OpenCode's Go docs
@@ -16,16 +14,16 @@ import (
 type DocsModel struct {
 	ID         string
 	Name       string
-	WireFormat core.WireFormat
+	WireFormat WireFormat
 }
 
 const endpointsHeading = "## Endpoints"
 
 // endpointWireFormats maps the path after /v1/ to the wire format it serves.
-var endpointWireFormats = map[string]core.WireFormat{
-	"chat/completions": core.WireFormatOpenAIChat,
-	"messages":         core.WireFormatAnthropic,
-	"responses":        core.WireFormatOpenAIResponses,
+var endpointWireFormats = map[string]WireFormat{
+	"chat/completions": WireFormatOpenAI,
+	"messages":         WireFormatAnthropic,
+	"responses":        WireFormatResponses,
 }
 
 // ParseDocsTable reads the Endpoints table from the Go docs markdown.

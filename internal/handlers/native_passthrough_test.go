@@ -40,6 +40,16 @@ const claudeCodeFields = `
 	"top_k":40,
 	"max_tokens":64`
 
+// structuredOutputFields is Claude Code's session-title request: no thinking,
+// and an output_config carrying a JSON schema the rebuild dropped whole.
+const structuredOutputFields = `
+	"metadata":{"user_id":"u1"},
+	"output_config":{"effort":"high","format":{"type":"json_schema","schema":{
+		"type":"object","properties":{"title":{"type":"string"}},
+		"required":["title"],"additionalProperties":false}}},
+	"system":"be brief",
+	"max_tokens":64`
+
 // TestHandleMessages_NativeAnthropicForwardsClientBody checks, through the
 // production wiring, that a native /v1/messages model receives the client's
 // request as sent: only model and stream are set, and messages carry the
@@ -47,11 +57,13 @@ const claudeCodeFields = `
 func TestHandleMessages_NativeAnthropicForwardsClientBody(t *testing.T) {
 	var mu sync.Mutex
 	var got []byte
+	var gotVersion string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		if r.URL.Path == "/v1/messages" && got == nil {
 			got = body
+			gotVersion = r.Header.Get("anthropic-version")
 		}
 		mu.Unlock()
 		http.Error(w, `{"error":"fake"}`, http.StatusInternalServerError)
@@ -88,14 +100,23 @@ func TestHandleMessages_NativeAnthropicForwardsClientBody(t *testing.T) {
 		counter, metrics.New(), nil, nil, nil,
 	)
 
-	for _, stream := range []bool{true, false} {
-		name := map[bool]string{true: "streaming", false: "non-streaming"}[stream]
+	cases := []struct {
+		name   string
+		fields string
+		stream bool
+	}{
+		{"streaming", claudeCodeFields, true},
+		{"non-streaming", claudeCodeFields, false},
+		{"structured output", structuredOutputFields, true},
+	}
+	for _, tc := range cases {
+		name, fields, stream := tc.name, tc.fields, tc.stream
 		t.Run(name, func(t *testing.T) {
 			mu.Lock()
 			got = nil
 			mu.Unlock()
 			streamJSON, _ := json.Marshal(stream)
-			sent := `{"model":"qwen3.8-flash","stream":` + string(streamJSON) + `,` + claudeCodeFields +
+			sent := `{"model":"qwen3.8-flash","stream":` + string(streamJSON) + `,` + fields +
 				`,"messages":` + interruptedHistory + `}`
 			req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(sent))
 			req.Header.Set("Content-Type", "application/json")
@@ -105,6 +126,11 @@ func TestHandleMessages_NativeAnthropicForwardsClientBody(t *testing.T) {
 			defer mu.Unlock()
 			if got == nil {
 				t.Fatal("nothing reached /v1/messages")
+			}
+			// ogc sent this on every native request; OpenCode Go accepts its
+			// absence today, so only a test keeps it from being dropped again.
+			if gotVersion != "2023-06-01" {
+				t.Errorf("anthropic-version header = %q, want %q", gotVersion, "2023-06-01")
 			}
 			var sentFields, gotFields map[string]json.RawMessage
 			if err := json.Unmarshal([]byte(sent), &sentFields); err != nil {

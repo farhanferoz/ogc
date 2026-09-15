@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"sort"
 	"time"
-
-	"github.com/routatic/proxy/internal/core"
 )
 
 // nativeCheckMaxAge is how long an "unknown" native-support verdict is
@@ -83,7 +81,7 @@ func Sync(ctx context.Context, deps Deps, previous *Snapshot) (*Snapshot, error)
 		if docsModel, ok := docsByID[id]; ok {
 			model.InDocs = true
 			model.Name = docsModel.Name
-			model.WireFormat = wireFormatFromCore(docsModel.WireFormat)
+			model.WireFormat = docsModel.WireFormat
 		} else {
 			model.WireFormat = WireFormatOpenAI
 		}
@@ -134,20 +132,15 @@ func needsNativeCheck(model Model, now time.Time) bool {
 	}
 }
 
-// wireFormatFromCore converts a docs-table wire format (an internal/core
-// type, since ParseDocsTable already returns one) to the string-based
-// WireFormat this package stores in the snapshot. WireFormatGemini never
-// appears here — the Go docs Endpoints table has no Gemini endpoint — so it
-// falls through to WireFormatOpenAI like any other unrecognised value.
-func wireFormatFromCore(w core.WireFormat) WireFormat {
-	switch w {
-	case core.WireFormatAnthropic:
-		return WireFormatAnthropic
-	case core.WireFormatOpenAIResponses:
-		return WireFormatResponses
-	default:
-		return WireFormatOpenAI
-	}
+// SyncResult is what SyncAndWrite returns on a successful sync: the new
+// snapshot plus its id-level delta against whatever snapshot preceded it —
+// SyncAndWrite already has to load the previous snapshot to carry native
+// checks forward, so it hands the delta back too and no caller needs to
+// load the file a second time just to report what changed.
+type SyncResult struct {
+	Snapshot *Snapshot
+	Added    []string
+	Removed  []string
 }
 
 // SyncAndWrite loads the previous snapshot at snapshotPath (if any), builds
@@ -157,7 +150,7 @@ func wireFormatFromCore(w core.WireFormat) WireFormat {
 // A corrupt previous snapshot does not block a fresh sync: it is logged and
 // treated as "nothing to carry forward" (every model starts as
 // not_checked again).
-func SyncAndWrite(ctx context.Context, deps Deps, snapshotPath string) (*Snapshot, error) {
+func SyncAndWrite(ctx context.Context, deps Deps, snapshotPath string) (*SyncResult, error) {
 	previous, err := LoadSnapshot(snapshotPath)
 	if err != nil {
 		slog.Warn("gomodels: ignoring corrupt previous snapshot", "path", snapshotPath, "error", err)
@@ -171,7 +164,8 @@ func SyncAndWrite(ctx context.Context, deps Deps, snapshotPath string) (*Snapsho
 	if err := WriteSnapshot(snapshotPath, snap); err != nil {
 		return nil, err
 	}
-	return snap, nil
+	added, removed := Delta(previous, snap)
+	return &SyncResult{Snapshot: snap, Added: added, Removed: removed}, nil
 }
 
 // Delta compares two snapshots' model id sets and reports which ids are new

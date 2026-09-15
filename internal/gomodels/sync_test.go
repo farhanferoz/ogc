@@ -177,6 +177,39 @@ func TestSync_AnyFailingSourceReturnsErrorAndNoSnapshot(t *testing.T) {
 	}
 }
 
+func TestSyncAndWrite_ResultReportsDeltaWithoutASecondFileLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := SnapshotPath(dir)
+
+	firstLive := staticServer(t, liveModelsJSON("glm-5.3"))
+	docs := staticServer(t, buildDocsMarkdown(docsRow("GLM-5.3", "glm-5.3", "chat/completions")))
+	meta := staticServer(t, metadataJSON(t, map[string]modelMetadata{}))
+	deps := Deps{HTTPClient: firstLive.Client(), LiveURL: firstLive.URL, DocsURL: docs.URL, MetadataURL: meta.URL}
+
+	first, err := SyncAndWrite(context.Background(), deps, path)
+	if err != nil {
+		t.Fatalf("first SyncAndWrite: %v", err)
+	}
+	if len(first.Added) != 1 || first.Added[0] != "glm-5.3" || len(first.Removed) != 0 {
+		t.Errorf("first sync result = %+v, want added=[glm-5.3] removed=[]", first)
+	}
+
+	secondLive := staticServer(t, liveModelsJSON("minimax-m3"))
+	deps.LiveURL = secondLive.URL
+	deps.HTTPClient = secondLive.Client()
+
+	second, err := SyncAndWrite(context.Background(), deps, path)
+	if err != nil {
+		t.Fatalf("second SyncAndWrite: %v", err)
+	}
+	if len(second.Added) != 1 || second.Added[0] != "minimax-m3" {
+		t.Errorf("second sync Added = %v, want [minimax-m3]", second.Added)
+	}
+	if len(second.Removed) != 1 || second.Removed[0] != "glm-5.3" {
+		t.Errorf("second sync Removed = %v, want [glm-5.3]", second.Removed)
+	}
+}
+
 func TestSyncAndWrite_FailingSourceLeavesOldFileUntouched(t *testing.T) {
 	dir := t.TempDir()
 	path := SnapshotPath(dir)

@@ -453,8 +453,17 @@ func (h *StreamHandler) processSSELine(
 					break
 				}
 			}
+			// Decode the slice as the JSON string it is, quotes included:
+			// passing the raw bytes on would send \" and \n to the client as
+			// literal backslashes. A slice that will not decode falls through
+			// to the full parse below.
+			var content string
 			if end != -1 {
-				content := data[start : start+end]
+				if err := json.Unmarshal(data[start-1:start+end+1], &content); err != nil {
+					end = -1
+				}
+			}
+			if end != -1 {
 				if len(content) > 0 {
 					if !*contentStarted {
 						// If reasoning was already started, close it first

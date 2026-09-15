@@ -242,6 +242,7 @@ func (h *StreamHandler) ProxyStream(
 	terminalStopReason := ""
 	var terminalUsage *types.UsageInfo
 	toolUseCount := 0
+	visibleBlockCount := 0
 	startedToolCalls := make(map[int]int) // maps OpenAI tool call index → Anthropic content block index
 	decodeErrors := 0                     // consecutive SSE decode failures
 	sawDone := false                      // saw a data: [DONE] sentinel
@@ -260,8 +261,30 @@ func (h *StreamHandler) ProxyStream(
 	// terminal message_delta plus message_stop. It runs both on a clean end of
 	// stream and on an upstream failure that arrives after finish_reason.
 	finishStream := func() error {
-		if _, err := closeOpenBlock(w, contentIndex, &contentStarted, &reasoningStarted); err != nil {
+		closed, err := closeOpenBlock(w, contentIndex, &contentStarted, &reasoningStarted)
+		if err != nil {
 			return ErrClientDisconnected
+		}
+		if closed {
+			contentIndex++
+		}
+
+		// A turn whose whole content was thinking has nothing Claude Code can
+		// render, and it reports "[Your previous response had no visible
+		// output]". ogc closed such a turn with an empty visible text block;
+		// a turn that called a tool needs none, being visible already.
+		if visibleBlockCount == 0 && toolUseCount == 0 && len(startedToolCalls) == 0 {
+			startEvent := types.MessageEvent{
+				Type:         "content_block_start",
+				Index:        &contentIndex,
+				ContentBlock: &types.ContentBlock{Type: "text", Text: ""},
+			}
+			if err := writeSSEEvent(w, startEvent); err != nil {
+				return ErrClientDisconnected
+			}
+			if err := writeContentBlockStop(w, contentIndex); err != nil {
+				return ErrClientDisconnected
+			}
 		}
 
 		// Send stop events for any tool blocks not yet closed (e.g. upstream
@@ -327,7 +350,7 @@ func (h *StreamHandler) ProxyStream(
 				b := (*readBuf)[i]
 				if b == '\n' {
 					// Process complete line
-					if err := h.processSSELine(w, flusher, lineBuf, &contentIndex, &contentStarted, &reasoningStarted, &terminalStopReason, &terminalUsage, &toolUseCount, startedToolCalls, originalModel, &decodeErrors, &sawDone); err != nil {
+					if err := h.processSSELine(w, flusher, lineBuf, &contentIndex, &contentStarted, &reasoningStarted, &terminalStopReason, &terminalUsage, &toolUseCount, &visibleBlockCount, startedToolCalls, originalModel, &decodeErrors, &sawDone); err != nil {
 						return err
 					}
 					lineBuf = lineBuf[:0]
@@ -340,7 +363,7 @@ func (h *StreamHandler) ProxyStream(
 		if err == io.EOF {
 			// Process any remaining data in buffer
 			if len(lineBuf) > 0 {
-				if err := h.processSSELine(w, flusher, lineBuf, &contentIndex, &contentStarted, &reasoningStarted, &terminalStopReason, &terminalUsage, &toolUseCount, startedToolCalls, originalModel, &decodeErrors, &sawDone); err != nil {
+				if err := h.processSSELine(w, flusher, lineBuf, &contentIndex, &contentStarted, &reasoningStarted, &terminalStopReason, &terminalUsage, &toolUseCount, &visibleBlockCount, startedToolCalls, originalModel, &decodeErrors, &sawDone); err != nil {
 					return err
 				}
 			}
@@ -393,6 +416,10 @@ func (h *StreamHandler) processSSELine(
 	terminalStopReason *string,
 	terminalUsage **types.UsageInfo,
 	toolUseCount *int,
+	// visibleBlockCount counts visible text blocks opened during the stream. A
+	// finish_reason chunk closes the open block and clears contentStarted, so
+	// only a count still answers "did this turn show anything" at the end.
+	visibleBlockCount *int,
 	startedToolCalls map[int]int,
 	originalModel string,
 	decodeErrors *int,
@@ -475,6 +502,7 @@ func (h *StreamHandler) processSSELine(
 							*contentIndex++
 						}
 						*contentStarted = true
+						*visibleBlockCount++
 						// Send content_block_start
 						startEvent := types.MessageEvent{
 							Type:         "content_block_start",
@@ -601,6 +629,7 @@ func (h *StreamHandler) processSSELine(
 				*contentIndex++
 			}
 			*contentStarted = true
+			*visibleBlockCount++
 			startEvent := types.MessageEvent{
 				Type:         "content_block_start",
 				Index:        contentIndex,
@@ -661,6 +690,7 @@ func (h *StreamHandler) processSSELine(
 					*contentIndex++
 				}
 				*toolUseCount++
+				*visibleBlockCount++
 				blockIdx = *contentIndex
 				startedToolCalls[oi] = blockIdx
 

@@ -44,6 +44,25 @@ Checked 2026-09-14 on claude 2.1.270 with a headless `-p` run dispatching the
 `utility-worker` agent (`model: haiku`): without the variables its transcript
 shows `500 no model mapping found`; with them it runs on `deepseek-v4-flash`.
 
+**Agent Teams is off for OpenCode launches.** `_ccage_pre_exec_hook` seeds
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0` into the cage's `settings.json` when
+`OPENCODE=1` or `CCAGE_OPENCODE=1`, and `1` otherwise.
+
+The tier variables alone did not make subagents usable. With Agent Teams on, a
+named Agent call launches an in-process teammate, and the teammate's result
+reaches the lead only when the lead's turn ends. A `ccage-auto` lead works in
+long turns and fills every turn end with a queued command, so the result never
+arrived. The headless check above could not show this: under `-p` a named agent
+is always a plain subagent.
+
+Measured 2026-09-15 on claude 2.1.272, DeepSeek V4 Flash, interactive lead kept
+busy in one turn with a prompt queued mid-turn:
+- with teams on, the result was delivered only at the turn end, about 2 minutes
+  after the teammate finished;
+- with teams off, it arrived mid-turn as a queued task-notification, 4 s after
+  launch;
+- with the cage's real hooks it arrived the same way, 4 s after launch.
+
 Run / inspect:
 
     systemctl --user restart ogc      # after rebuilding the binary

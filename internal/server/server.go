@@ -27,6 +27,11 @@ import (
 	"github.com/routatic/proxy/internal/token"
 )
 
+// ShutdownDrainTimeout bounds how long shutdown waits for in-flight requests.
+// Streamed responses routinely run longer than 10 s, so a short drain cut them
+// off on every restart. Keep it below the service manager's stop timeout.
+const ShutdownDrainTimeout = 40 * time.Second
+
 // Server represents the proxy server.
 type Server struct {
 	atomic        *config.AtomicConfig
@@ -245,7 +250,7 @@ func (s *Server) Start() error {
 			s.retention.Stop()
 		}
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownDrainTimeout)
 
 		s.mu.Lock()
 		srvToShutdown := s.httpSrv

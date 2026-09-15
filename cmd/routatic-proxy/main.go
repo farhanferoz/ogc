@@ -418,7 +418,7 @@ Press Ctrl+C to stop the server.`,
 			}
 
 			// Graceful shutdown.
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), server.ShutdownDrainTimeout)
 			defer shutdownCancel()
 			_ = srv.Shutdown(shutdownCtx)
 			if guiSrv != nil {

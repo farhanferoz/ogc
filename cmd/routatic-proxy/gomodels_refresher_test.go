@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/routatic/proxy/internal/config"
+	"github.com/routatic/proxy/internal/gomodels"
 )
 
 // TestStartGoModelsRefresher_StopCancelsInFlightSync checks that stopping the
@@ -40,7 +41,7 @@ func TestStartGoModelsRefresher_StopCancelsInFlightSync(t *testing.T) {
 	}
 	atomicCfg := config.NewAtomicConfig(cfg, filepath.Join(t.TempDir(), "config.json"))
 
-	stop := startGoModelsRefresher(atomicCfg)
+	stop := startGoModelsRefresher(atomicCfg, func(*gomodels.Snapshot) {})
 	select {
 	case <-requested:
 	case <-time.After(5 * time.Second):

@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/routatic/proxy/internal/core"
 )
 
 func TestFetchLiveModels_ParsesDataArray(t *testing.T) {
@@ -76,7 +74,7 @@ func TestFetchDocsTable_ParsesEndpointsTable(t *testing.T) {
 	if len(models) != 3 {
 		t.Fatalf("got %d models, want 3", len(models))
 	}
-	if models[1].ID != "glm-5.3" || models[1].WireFormat != core.WireFormatOpenAIChat {
+	if models[1].ID != "glm-5.3" || models[1].WireFormat != WireFormatOpenAI {
 		t.Errorf("models[1] = %+v", models[1])
 	}
 }

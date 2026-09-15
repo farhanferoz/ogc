@@ -30,6 +30,7 @@ type Config struct {
 	Logging                        LoggingConfig            `json:"logging"`
 	Debug                          DebugConfig              `json:"debug"`
 	Catalog                        CatalogConfig            `json:"catalog"`
+	GoModels                       GoModelsConfig           `json:"go_models"`
 	Performance                    PerformanceConfig        `json:"performance,omitempty"`
 	Storage                        *StorageConfig           `json:"storage,omitempty"`
 	UpdateChannel                  string                   `json:"update_channel,omitempty"`
@@ -76,6 +77,19 @@ type CatalogConfig struct {
 	MaxAgeHours int    `json:"max_age_hours"`
 	SourceURL   string `json:"source_url"`
 	Enabled     *bool  `json:"enabled,omitempty"`
+}
+
+// GoModelsConfig controls automatic syncing of the OpenCode Go live model
+// list (internal/gomodels). When enabled, new models become routable and
+// retired ones disappear without any config edit.
+type GoModelsConfig struct {
+	// Enabled defaults to true when nil, matching CatalogConfig.Enabled.
+	Enabled      *bool  `json:"enabled,omitempty"`
+	RefreshHours int    `json:"refresh_hours,omitempty"`
+	CheckNative  bool   `json:"check_native,omitempty"`
+	DocsURL      string `json:"docs_url,omitempty"`
+	ModelsURL    string `json:"models_url,omitempty"`
+	MetadataURL  string `json:"metadata_url,omitempty"`
 }
 
 // DebugConfig holds debug-related configuration.

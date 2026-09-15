@@ -139,12 +139,29 @@ type goModelsSnapshot struct {
 }
 
 // goModelsSnapshotModel mirrors gomodels.Model's JSON shape. Only the fields
-// the merge needs are decoded; unknown fields (name, in_docs, native_*) are
+// the merge needs are decoded; unknown fields (name, in_docs, ...) are
 // ignored.
 type goModelsSnapshotModel struct {
-	ID            string `json:"id"`
-	WireFormat    string `json:"wire_format"`
-	ContextWindow int    `json:"context_window"`
+	ID             string `json:"id"`
+	WireFormat     string `json:"wire_format"`
+	ContextWindow  int    `json:"context_window"`
+	NativeMessages string `json:"native_messages"`
+}
+
+// goModelsNativeSupportYes mirrors gomodels.NativeSupportYes. Duplicated for
+// the same import-cycle reason as goModelsSnapshotModel above.
+const goModelsNativeSupportYes = "yes"
+
+// effectiveWireFormat returns the wire_format to route m with: the
+// snapshot's own wire_format is the docs (or default) truth and is never
+// overwritten in the snapshot itself, but a native_messages "yes" verdict
+// means the model actually accepts the Anthropic Messages endpoint, so the
+// merge routes it there.
+func (m goModelsSnapshotModel) effectiveWireFormat() string {
+	if m.NativeMessages == goModelsNativeSupportYes {
+		return "anthropic"
+	}
+	return m.WireFormat
 }
 
 // mergeGoModelsSnapshot adds each model from go-models.json (written
@@ -182,7 +199,7 @@ func mergeGoModelsSnapshot(cfg *Config, configPath string) {
 		cfg.Models[m.ID] = ModelConfig{
 			Provider:      ProviderOpenCodeGo,
 			ModelID:       m.ID,
-			WireFormat:    m.WireFormat,
+			WireFormat:    m.effectiveWireFormat(),
 			ContextWindow: m.ContextWindow,
 			Temperature:   def.Temperature,
 			MaxTokens:     def.MaxTokens,

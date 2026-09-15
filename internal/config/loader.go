@@ -3,10 +3,13 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -142,7 +145,42 @@ func loadJSON(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing JSON: %w", err)
 	}
 
+	if unknown := unknownTopLevelFields(data); len(unknown) > 0 {
+		slog.Warn("config keys this build does not read, ignored", "keys", unknown, "path", path)
+	}
+
 	return &cfg, nil
+}
+
+// unknownTopLevelFields returns the config's top-level keys that no Config
+// field claims, sorted. json.Unmarshal drops them without a word, so an ogc
+// config naming model_mapping loads clean and routes nothing. A warning, not
+// an error: an unreadable key is never a reason to refuse to start.
+func unknownTopLevelFields(data []byte) []string {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+
+	known := make(map[string]bool)
+	configType := reflect.TypeOf(Config{})
+	for i := range configType.NumField() {
+		field := configType.Field(i)
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if name == "" {
+			name = field.Name
+		}
+		known[name] = true
+	}
+
+	var unknown []string
+	for key := range raw {
+		if !known[key] {
+			unknown = append(unknown, key)
+		}
+	}
+	slices.Sort(unknown)
+	return unknown
 }
 
 // interpolateEnvVars replaces ${ENV_VAR} patterns with their actual values.

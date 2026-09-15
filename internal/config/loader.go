@@ -30,8 +30,6 @@ const (
 	defaultGoModelsModelsURL    = "https://opencode.ai/zen/go/v1/models"
 	defaultGoModelsMetadataURL  = "https://models.dev/api.json"
 
-	goModelsSnapshotFileName = "go-models.json"
-
 	defaultZenBaseURL          = "https://opencode.ai/zen/v1/chat/completions"
 	defaultZenAnthropicBaseURL = "https://opencode.ai/zen/v1/messages"
 	defaultZenResponsesBaseURL = "https://opencode.ai/zen/v1/responses"
@@ -90,8 +88,6 @@ func LoadFromPath(path string) (*Config, error) {
 		return nil, fmt.Errorf("loading config from %s: %w", path, err)
 	}
 
-	mergeGoModelsSnapshot(cfg, path)
-
 	applyEnvOverrides(cfg)
 	applyDefaults(cfg)
 
@@ -128,83 +124,6 @@ func expandHome(path string) string {
 		return filepath.Join(home, path[2:])
 	}
 	return path
-}
-
-// goModelsSnapshot mirrors the on-disk shape internal/gomodels writes to
-// go-models.json. It is duplicated here rather than imported because
-// internal/gomodels depends on internal/core, which depends on this
-// package — importing internal/gomodels from here would be an import cycle.
-type goModelsSnapshot struct {
-	Models []goModelsSnapshotModel `json:"models"`
-}
-
-// goModelsSnapshotModel mirrors gomodels.Model's JSON shape. Only the fields
-// the merge needs are decoded; unknown fields (name, in_docs, ...) are
-// ignored.
-type goModelsSnapshotModel struct {
-	ID             string `json:"id"`
-	WireFormat     string `json:"wire_format"`
-	ContextWindow  int    `json:"context_window"`
-	NativeMessages string `json:"native_messages"`
-}
-
-// goModelsNativeSupportYes mirrors gomodels.NativeSupportYes. Duplicated for
-// the same import-cycle reason as goModelsSnapshotModel above.
-const goModelsNativeSupportYes = "yes"
-
-// effectiveWireFormat returns the wire_format to route m with: the
-// snapshot's own wire_format is the docs (or default) truth and is never
-// overwritten in the snapshot itself, but a native_messages "yes" verdict
-// means the model actually accepts the Anthropic Messages endpoint, so the
-// merge routes it there.
-func (m goModelsSnapshotModel) effectiveWireFormat() string {
-	if m.NativeMessages == goModelsNativeSupportYes {
-		return "anthropic"
-	}
-	return m.WireFormat
-}
-
-// mergeGoModelsSnapshot adds each model from go-models.json (written
-// periodically by the gomodels sync, beside the config file) into
-// cfg.Models, but only for ids that are not already configured there —
-// hand-written config always wins over the synced snapshot.
-//
-// A missing snapshot file is normal (sync hasn't run yet, or is disabled)
-// and is not an error. A corrupt one is logged and ignored so that a bad
-// snapshot can never block the proxy from starting.
-func mergeGoModelsSnapshot(cfg *Config, configPath string) {
-	snapshotPath := filepath.Join(filepath.Dir(configPath), goModelsSnapshotFileName)
-	data, err := os.ReadFile(snapshotPath)
-	if err != nil {
-		return
-	}
-
-	var snap goModelsSnapshot
-	if err := json.Unmarshal(data, &snap); err != nil {
-		fmt.Fprintf(os.Stderr, "WARNING: config: %s is corrupt, ignoring: %v\n", snapshotPath, err)
-		return
-	}
-
-	if cfg.Models == nil {
-		cfg.Models = make(map[string]ModelConfig)
-	}
-	def := cfg.Models["default"]
-	for _, m := range snap.Models {
-		if m.ID == "" {
-			continue
-		}
-		if _, exists := cfg.Models[m.ID]; exists {
-			continue
-		}
-		cfg.Models[m.ID] = ModelConfig{
-			Provider:      ProviderOpenCodeGo,
-			ModelID:       m.ID,
-			WireFormat:    m.effectiveWireFormat(),
-			ContextWindow: m.ContextWindow,
-			Temperature:   def.Temperature,
-			MaxTokens:     def.MaxTokens,
-		}
-	}
 }
 
 // loadJSON reads and parses the configuration file.

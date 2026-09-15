@@ -101,14 +101,15 @@ func Sync(ctx context.Context, deps Deps, previous *Snapshot) (*Snapshot, error)
 		// The native check only applies to models the docs (or the default,
 		// for models missing from the docs) classify as plain OpenAI chat —
 		// a docs-listed anthropic or responses model is never probed.
-		if model.WireFormat == WireFormatOpenAI {
-			if deps.CheckNative && needsNativeCheck(model, now) {
-				model.NativeMessages = checkNativeMessages(ctx, deps.HTTPClient, deps.AnthropicURL, deps.ChatURL, deps.APIKey, id)
-				model.NativeCheckedAt = &now
-			}
-			if model.NativeMessages == NativeSupportYes {
-				model.WireFormat = WireFormatAnthropic
-			}
+		//
+		// WireFormat here always stays the docs (or default) truth — it is
+		// never overwritten with the check's verdict. NativeMessages alone
+		// carries that verdict; a "yes" reading is instead consumed by the
+		// config loader's merge, which derives the effective "anthropic"
+		// routing from it (see internal/config/loader.go).
+		if model.WireFormat == WireFormatOpenAI && deps.CheckNative && needsNativeCheck(model, now) {
+			model.NativeMessages = checkNativeMessages(ctx, deps.HTTPClient, deps.AnthropicURL, deps.ChatURL, deps.APIKey, id)
+			model.NativeCheckedAt = &now
 		}
 
 		models = append(models, model)

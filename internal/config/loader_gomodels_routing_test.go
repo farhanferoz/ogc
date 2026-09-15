@@ -22,9 +22,13 @@ import (
 // (OpenCodeGoProvider.WireFormat, see internal/provider/opencode_go.go),
 // that a model known only from the go-models.json snapshot — never
 // hand-configured — reaches the Anthropic /v1/messages endpoint once the
-// snapshot records it as natively supporting the Messages wire format
-// (native_messages "yes" -> wire_format "anthropic", set by
-// internal/gomodels.Sync).
+// snapshot records it as natively supporting the Messages wire format.
+//
+// The snapshot's own wire_format stays "openai" (the docs/default truth,
+// never overwritten by the native check — see internal/gomodels.Sync); it
+// is the config loader's merge that derives the effective "anthropic"
+// routing from native_messages: "yes" (see loader.go's
+// goModelsSnapshotModel.effectiveWireFormat).
 func TestLoadFromPath_SnapshotOnlyNativeModelRoutesToMessagesEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
@@ -35,7 +39,7 @@ func TestLoadFromPath_SnapshotOnlyNativeModelRoutesToMessagesEndpoint(t *testing
 	// Mirrors the shape internal/gomodels.Snapshot marshals for a model that
 	// checkNativeMessages found to accept /v1/messages directly.
 	snapshotJSON := `{"fetched_at":"2026-09-15T00:00:00Z","models":[
-		{"id":"newly-native-model","name":"Newly Native","wire_format":"anthropic","in_docs":false,"context_window":64000,"native_messages":"yes","native_checked_at":"2026-09-15T00:00:00Z"}
+		{"id":"newly-native-model","name":"Newly Native","wire_format":"openai","in_docs":false,"context_window":64000,"native_messages":"yes","native_checked_at":"2026-09-15T00:00:00Z"}
 	]}`
 	if err := os.WriteFile(filepath.Join(dir, "go-models.json"), []byte(snapshotJSON), 0644); err != nil {
 		t.Fatal(err)

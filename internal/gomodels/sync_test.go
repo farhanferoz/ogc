@@ -275,8 +275,12 @@ func TestSync_NativeCheckOutcomesAndCarryForward(t *testing.T) {
 	}
 
 	yes := modelByID(t, snap, "yes-model")
-	if yes.NativeMessages != NativeSupportYes || yes.WireFormat != WireFormatAnthropic {
-		t.Errorf("yes-model = %+v, want native=yes wire_format=anthropic", yes)
+	// wire_format stays the docs/default truth ("openai" here, since
+	// yes-model isn't in the docs table); native_messages alone carries the
+	// check's verdict. The config loader — not the snapshot — derives
+	// "anthropic" routing from native_messages: "yes".
+	if yes.NativeMessages != NativeSupportYes || yes.WireFormat != WireFormatOpenAI {
+		t.Errorf("yes-model = %+v, want native=yes wire_format=openai (unchanged)", yes)
 	}
 	if yes.NativeCheckedAt == nil {
 		t.Error("yes-model NativeCheckedAt should be set")
@@ -309,7 +313,7 @@ func TestSync_NativeCheckOutcomesAndCarryForward(t *testing.T) {
 		t.Fatalf("second Sync: %v", err)
 	}
 	yes2 := modelByID(t, snap2, "yes-model")
-	if yes2.WireFormat != WireFormatAnthropic || yes2.NativeMessages != NativeSupportYes {
+	if yes2.WireFormat != WireFormatOpenAI || yes2.NativeMessages != NativeSupportYes {
 		t.Errorf("carried-forward yes-model = %+v", yes2)
 	}
 	if !yes2.NativeCheckedAt.Equal(*yes.NativeCheckedAt) {

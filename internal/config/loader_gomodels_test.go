@@ -52,6 +52,52 @@ func TestLoadFromPath_GoModelsSnapshotFillsGaps(t *testing.T) {
 	}
 }
 
+func TestLoadFromPath_NativeYesDerivesAnthropicWireFormat(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"api_key": "test-key"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// The snapshot's own wire_format is the docs truth ("openai") and is
+	// never rewritten by internal/gomodels; native_messages "yes" is what
+	// the merge must translate into "anthropic" routing.
+	writeGoModelsFixture(t, dir,
+		goModelsSnapshotModel{ID: "chat-only-model", WireFormat: "openai", NativeMessages: "yes"},
+	)
+
+	cfg, err := LoadFromPath(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadFromPath: %v", err)
+	}
+	got := cfg.Models["chat-only-model"]
+	if got.WireFormat != "anthropic" {
+		t.Errorf("WireFormat = %q, want %q (derived from native_messages=yes)", got.WireFormat, "anthropic")
+	}
+}
+
+func TestLoadFromPath_NativeNotYesKeepsDocsWireFormat(t *testing.T) {
+	for _, native := range []string{"no", "unknown", "not_checked", ""} {
+		t.Run(native, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "config.json")
+			if err := os.WriteFile(cfgPath, []byte(`{"api_key": "test-key"}`), 0644); err != nil {
+				t.Fatal(err)
+			}
+			writeGoModelsFixture(t, dir,
+				goModelsSnapshotModel{ID: "m", WireFormat: "openai", NativeMessages: native},
+			)
+
+			cfg, err := LoadFromPath(cfgPath)
+			if err != nil {
+				t.Fatalf("LoadFromPath: %v", err)
+			}
+			if got := cfg.Models["m"].WireFormat; got != "openai" {
+				t.Errorf("native_messages=%q: WireFormat = %q, want unchanged %q", native, got, "openai")
+			}
+		})
+	}
+}
+
 func TestLoadFromPath_HandWrittenConfigWinsOverSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")

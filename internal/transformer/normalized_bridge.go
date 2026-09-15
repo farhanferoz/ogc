@@ -42,6 +42,13 @@ func NormalizedToAnthropic(req *core.NormalizedRequest, model config.ModelConfig
 	return anthropicReq
 }
 
+// interruptedToolCallPlaceholder is the synthetic answer inserted for a tool
+// call that never got a real result (e.g. the user interrupted it with
+// Ctrl+C). Mirrors the placeholder text RequestTransformer.
+// fixToolMessageOrdering uses for the same scenario on the chat-completions
+// translation (internal/transformer/request.go).
+const interruptedToolCallPlaceholder = "[Operation interrupted by user]"
+
 // NormalizedToResponses converts a NormalizedRequest to a ResponsesRequest.
 func NormalizedToResponses(req *core.NormalizedRequest, model config.ModelConfig) *types.ResponsesRequest {
 	responsesReq := &types.ResponsesRequest{
@@ -113,6 +120,8 @@ func NormalizedToResponses(req *core.NormalizedRequest, model config.ModelConfig
 		flushText()
 	}
 
+	responsesReq.Input = fixResponsesCallOrdering(responsesReq.Input)
+
 	// Convert tools.
 	for _, tool := range req.Tools {
 		responsesReq.Tools = append(responsesReq.Tools, types.ResponsesTool{
@@ -124,6 +133,73 @@ func NormalizedToResponses(req *core.NormalizedRequest, model config.ModelConfig
 	}
 
 	return responsesReq
+}
+
+// fixResponsesCallOrdering ensures every "function_call" item is answered by
+// a "function_call_output" item with a matching call_id, synthesizing a
+// placeholder output for any call left dangling. The Responses API has the
+// same requirement as OpenAI chat-completions: an unanswered function_call
+// gets rejected upstream. Mirrors RequestTransformer.fixToolMessageOrdering
+// (internal/transformer/request.go) for the flat Responses input list: a
+// contiguous run of function_call items is one "turn" (parallel tool calls
+// from a single assistant message); real outputs for that turn are kept in
+// the order they arrived, then synthetic outputs are appended for anything
+// still unanswered, and any other items in between (dangling user text,
+// unrelated outputs) are preserved after them.
+func fixResponsesCallOrdering(items []types.ResponsesInput) []types.ResponsesInput {
+	var result []types.ResponsesInput
+
+	i := 0
+	for i < len(items) {
+		item := items[i]
+		result = append(result, item)
+		i++
+
+		if item.Type != "function_call" {
+			continue
+		}
+
+		calls := []types.ResponsesInput{item}
+		for i < len(items) && items[i].Type == "function_call" {
+			result = append(result, items[i])
+			calls = append(calls, items[i])
+			i++
+		}
+
+		callsNeeded := make(map[string]bool, len(calls))
+		for _, c := range calls {
+			callsNeeded[c.CallID] = true
+		}
+
+		var outputs []types.ResponsesInput
+		var others []types.ResponsesInput
+		for i < len(items) && items[i].Type != "function_call" {
+			next := items[i]
+			if next.Type == "function_call_output" && callsNeeded[next.CallID] {
+				outputs = append(outputs, next)
+				delete(callsNeeded, next.CallID)
+			} else {
+				others = append(others, next)
+			}
+			i++
+		}
+
+		result = append(result, outputs...)
+
+		for _, c := range calls {
+			if callsNeeded[c.CallID] {
+				result = append(result, types.ResponsesInput{
+					Type:   "function_call_output",
+					CallID: c.CallID,
+					Output: rawJSONString(interruptedToolCallPlaceholder),
+				})
+			}
+		}
+
+		result = append(result, others...)
+	}
+
+	return result
 }
 
 // NormalizedToGemini converts a NormalizedRequest to a GeminiRequest.

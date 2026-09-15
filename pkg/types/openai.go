@@ -145,12 +145,13 @@ type UsageInfo struct {
 
 // ChatCompletionChunk represents a streaming chunk from the Chat Completions API.
 type ChatCompletionChunk struct {
-	ID      string     `json:"id"`
-	Object  string     `json:"object"`
-	Created int64      `json:"created"`
-	Model   string     `json:"model"`
-	Choices []Choice   `json:"choices"`
-	Usage   *UsageInfo `json:"usage,omitempty"`
+	ID      string          `json:"id"`
+	Object  string          `json:"object"`
+	Created int64           `json:"created"`
+	Model   string          `json:"model"`
+	Choices []Choice        `json:"choices"`
+	Usage   *UsageInfo      `json:"usage,omitempty"`
+	Error   json.RawMessage `json:"error,omitempty"` // set when the upstream fails mid-stream; may be JSON null
 }
 
 // ErrorResponse represents an error response from the OpenAI API.

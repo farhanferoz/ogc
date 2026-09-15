@@ -1128,6 +1128,13 @@ func TestProxyStream_NoUsageFallback(t *testing.T) {
 	}
 }
 
+// TestProxyStream_NoFinishReasonFallback used to pin a fallback: a stream
+// that delivered content then closed cleanly with no finish_reason chunk was
+// treated as a complete message (stop_reason defaulted to end_turn). That
+// fallback is indistinguishable from a truncated stream — Claude Code has no
+// way to tell "this upstream just doesn't send finish_reason" from "this
+// turn got cut off" — so a clean EOF with no finish_reason is now an error
+// instead of a guessed-complete message.
 func TestProxyStream_NoFinishReasonFallback(t *testing.T) {
 	handler := NewStreamHandler()
 	w := newMockResponseWriter()
@@ -1138,30 +1145,17 @@ func TestProxyStream_NoFinishReasonFallback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := handler.ProxyStream(w, body, "qwen3.6-plus", ctx, 0, cancel); err != nil {
-		t.Fatalf("ProxyStream error: %v", err)
-	}
-
-	events := parseSSEEvents(t, w.buf.String())
-	// Expected events:
-	// 0: message_start
-	// 1: content_block_start
-	// 2: content_block_delta
-	// 3: content_block_stop
-	// 4: message_delta (fallback stop_reason: end_turn)
-	// 5: message_stop
-	if len(events) != 6 {
-		t.Fatalf("expected 6 events, got %d: %+v", len(events), events)
-	}
-
-	if events[4].Type != "message_delta" || events[4].Delta == nil || events[4].Delta.StopReason != "end_turn" {
-		t.Errorf("event[4] = %+v, want message_delta(end_turn)", events[4])
+	err := handler.ProxyStream(w, body, "qwen3.6-plus", ctx, 0, cancel)
+	if err == nil {
+		t.Fatal("expected an error for a stream that ended without a finish_reason, got nil")
 	}
 }
 
-// TestProxyStream_EOFFallbackStopReasonToolUse verifies that when the stream
-// ends mid-tool-call (no finish_reason), the EOF fallback sets stop_reason
-// to "tool_use" rather than "end_turn".
+// TestProxyStream_EOFFallbackStopReasonToolUse used to verify that when the
+// stream ends mid-tool-call with no finish_reason, the EOF fallback set
+// stop_reason to "tool_use" and closed the message anyway. A stream ending
+// mid-tool-call with no finish_reason is truncated, not complete, so it is
+// now surfaced as an error instead of a guessed-complete tool_use message.
 func TestProxyStream_EOFFallbackStopReasonToolUse(t *testing.T) {
 	handler := NewStreamHandler()
 	w := newMockResponseWriter()
@@ -1173,25 +1167,9 @@ func TestProxyStream_EOFFallbackStopReasonToolUse(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := handler.ProxyStream(w, body, "kimi-k2.6", ctx, 0, cancel); err != nil {
-		t.Fatalf("ProxyStream error: %v", err)
-	}
-
-	events := parseSSEEvents(t, w.buf.String())
-
-	var msgDelta *types.MessageEvent
-	for i := range events {
-		if events[i].Type == "message_delta" {
-			msgDelta = &events[i]
-			break
-		}
-	}
-	if msgDelta == nil {
-		t.Fatalf("expected message_delta event, got none: %+v", events)
-		return
-	}
-	if msgDelta.Delta == nil || msgDelta.Delta.StopReason != "tool_use" {
-		t.Errorf("stop_reason = %q, want tool_use (stream ended mid-tool-call)", msgDelta.Delta.StopReason)
+	err := handler.ProxyStream(w, body, "kimi-k2.6", ctx, 0, cancel)
+	if err == nil {
+		t.Fatal("expected an error for a stream that ended mid-tool-call with no finish_reason, got nil")
 	}
 }
 
@@ -1329,6 +1307,54 @@ func TestProxyStream_UpstreamErrorBeforeFinishReasonStillFails(t *testing.T) {
 	err := handler.ProxyStream(w, &bodyThenErrReader{body: []byte(body), err: io.ErrUnexpectedEOF}, "kimi-k2.6", ctx, 0, cancel)
 	if err == nil {
 		t.Fatal("ProxyStream() error = nil, want error so the handler can fall back")
+	}
+}
+
+// TestProxyStream_InStreamErrorObjectFails pins that a chunk carrying a
+// non-null "error" object is surfaced as an error rather than silently
+// dropped (the chunk has no "choices", so without this check processSSELine
+// would just return nil and the stream would close as if it were healthy).
+func TestProxyStream_InStreamErrorObjectFails(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"content":"partial"}}]}`,
+		`{"error":{"message":"upstream exploded","type":"server_error"}}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := handler.ProxyStream(w, body, "kimi-k2.6", ctx, 0, cancel)
+	if err == nil {
+		t.Fatal("expected an error for a chunk carrying an in-stream error object, got nil")
+	}
+}
+
+// TestProxyStream_NullErrorFieldIsNotAnError pins that a literal
+// `"error": null` field — sent by some upstreams on every healthy chunk — is
+// NOT treated as an in-stream error, unlike a populated error object.
+func TestProxyStream_NullErrorFieldIsNotAnError(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"content":"hi"}}],"error":null}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}],"error":null}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyStream(w, body, "kimi-k2.6", ctx, 0, cancel); err != nil {
+		t.Fatalf("ProxyStream error: %v (a literal \"error\": null must not be treated as an in-stream error)", err)
+	}
+
+	out := w.buf.String()
+	if !strings.Contains(out, "hi") {
+		t.Errorf("expected content to reach the client despite the null error field, got: %s", out)
+	}
+	if !strings.Contains(out, "message_stop") {
+		t.Errorf("expected a normal message_stop, got: %s", out)
 	}
 }
 

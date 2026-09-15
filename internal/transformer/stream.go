@@ -367,6 +367,14 @@ func (h *StreamHandler) ProxyStream(
 		}
 	}
 
+	if terminalStopReason == "" {
+		// The upstream connection closed cleanly (EOF) but never sent a
+		// finish_reason chunk. Closing this as a normal message_stop would
+		// hand Claude Code a message that looks complete but is actually
+		// truncated; surface it as an error instead so the caller can retry
+		// or report the failure rather than silently losing the turn.
+		return fmt.Errorf("upstream stream ended without a finish_reason")
+	}
 	return finishStream()
 }
 
@@ -496,6 +504,13 @@ func (h *StreamHandler) processSSELine(
 		return nil
 	}
 	*decodeErrors = 0
+	if len(chunk.Error) > 0 && !bytes.Equal(bytes.TrimSpace(chunk.Error), []byte("null")) {
+		// An in-stream error object (as opposed to a JSON `"error": null`,
+		// which some upstreams send on every otherwise-healthy chunk) means
+		// the upstream failed mid-turn. Surface it rather than continuing as
+		// if the rest of the chunk were a normal delta.
+		return fmt.Errorf("upstream stream error: %s", chunk.Error)
+	}
 	if chunk.Usage != nil {
 		*terminalUsage = chunk.Usage
 	}

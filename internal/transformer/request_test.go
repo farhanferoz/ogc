@@ -132,8 +132,18 @@ func TestTransformRequestPreservesThinkingAsReasoningContent(t *testing.T) {
 		t.Fatalf("TransformRequest() error = %v", err)
 	}
 
-	if got, want := len(openaiReq.Messages), 1; got != want {
+	// The request ends on the assistant's tool_use with no tool_result ever
+	// following it, so fixToolMessageOrdering synthesizes a placeholder
+	// "tool" response for toolu_123 to satisfy OpenAI's "tool_calls must be
+	// answered" rule — hence 2 messages, not 1.
+	if got, want := len(openaiReq.Messages), 2; got != want {
 		t.Fatalf("len(Messages) = %d, want %d", got, want)
+	}
+	if got, want := openaiReq.Messages[1].Role, "tool"; got != want {
+		t.Fatalf("Messages[1].Role = %q, want %q", got, want)
+	}
+	if got, want := openaiReq.Messages[1].ToolCallID, "toolu_123"; got != want {
+		t.Fatalf("Messages[1].ToolCallID = %q, want %q", got, want)
 	}
 
 	msg := openaiReq.Messages[0]

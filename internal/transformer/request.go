@@ -414,7 +414,63 @@ func (t *RequestTransformer) transformMessages(anthropicReq *types.MessageReques
 		result = append(result, openaiMsgs...)
 	}
 
-	return result, nil
+	return t.fixToolMessageOrdering(result), nil
+}
+
+// fixToolMessageOrdering ensures tool messages strictly follow the assistant
+// message whose tool_calls they answer, and inserts synthetic tool responses
+// for any dangling/interrupted tool calls. OpenAI's chat-completions API
+// requires every tool_calls entry on an assistant message to be answered by
+// an immediately-following "tool" message with a matching tool_call_id; a
+// tool call left unanswered (e.g. the user interrupted it with Ctrl+C before
+// a result came back) would otherwise violate that rule and be rejected
+// upstream with a 400.
+func (t *RequestTransformer) fixToolMessageOrdering(messages []types.ChatMessage) []types.ChatMessage {
+	var result []types.ChatMessage
+
+	i := 0
+	for i < len(messages) {
+		msg := messages[i]
+		result = append(result, msg)
+		i++
+
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			toolCallsNeeded := make(map[string]bool)
+			for _, tc := range msg.ToolCalls {
+				toolCallsNeeded[tc.ID] = true
+			}
+
+			var toolMsgs []types.ChatMessage
+			var nonToolMsgs []types.ChatMessage
+
+			for i < len(messages) && messages[i].Role != "assistant" {
+				next := messages[i]
+				if next.Role == "tool" && toolCallsNeeded[next.ToolCallID] {
+					toolMsgs = append(toolMsgs, next)
+					delete(toolCallsNeeded, next.ToolCallID)
+				} else {
+					nonToolMsgs = append(nonToolMsgs, next)
+				}
+				i++
+			}
+
+			result = append(result, toolMsgs...)
+
+			for _, tc := range msg.ToolCalls {
+				if toolCallsNeeded[tc.ID] {
+					result = append(result, types.ChatMessage{
+						Role:       "tool",
+						Content:    contentText("[Operation interrupted by user]"),
+						ToolCallID: tc.ID,
+					})
+				}
+			}
+
+			result = append(result, nonToolMsgs...)
+		}
+	}
+
+	return result
 }
 
 // transformMessage converts a single Anthropic message to one or more OpenAI messages.

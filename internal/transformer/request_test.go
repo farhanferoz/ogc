@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -132,18 +133,11 @@ func TestTransformRequestPreservesThinkingAsReasoningContent(t *testing.T) {
 		t.Fatalf("TransformRequest() error = %v", err)
 	}
 
-	// The request ends on the assistant's tool_use with no tool_result ever
-	// following it, so fixToolMessageOrdering synthesizes a placeholder
-	// "tool" response for toolu_123 to satisfy OpenAI's "tool_calls must be
-	// answered" rule — hence 2 messages, not 1.
-	if got, want := len(openaiReq.Messages), 2; got != want {
+	// Answers for interrupted calls are added before translation
+	// (core.RepairDanglingToolCalls), so a history ending on the tool_use
+	// translates to the assistant message alone.
+	if got, want := len(openaiReq.Messages), 1; got != want {
 		t.Fatalf("len(Messages) = %d, want %d", got, want)
-	}
-	if got, want := openaiReq.Messages[1].Role, "tool"; got != want {
-		t.Fatalf("Messages[1].Role = %q, want %q", got, want)
-	}
-	if got, want := openaiReq.Messages[1].ToolCallID, "toolu_123"; got != want {
-		t.Fatalf("Messages[1].ToolCallID = %q, want %q", got, want)
 	}
 
 	msg := openaiReq.Messages[0]
@@ -869,6 +863,44 @@ func TestTransformRequestPlacesToolResultsBeforeUserText(t *testing.T) {
 	}
 	if got, want := openaiReq.Messages[2].ContentText(), "now continue"; got != want {
 		t.Fatalf("Messages[2].Content = %q, want %q", got, want)
+	}
+}
+
+// TestTransformRequestPlacesToolResultsBeforeEarlierUserText pins why the
+// chat translation needs no reorder step of its own: transformUserMessage
+// emits every tool_result of one Anthropic user message as a "tool" message
+// ahead of that message's text, whatever the block order.
+func TestTransformRequestPlacesToolResultsBeforeEarlierUserText(t *testing.T) {
+	req := &types.MessageRequest{
+		Model:     "claude-test",
+		MaxTokens: 256,
+		Messages: []types.Message{
+			{
+				Role:    "assistant",
+				Content: json.RawMessage(`[{"type":"tool_use","id":"toolu_123","name":"create_file","input":{"name":"draft.fig"}}]`),
+			},
+			{
+				Role: "user",
+				Content: json.RawMessage(`[
+					{"type":"text","text":"now continue"},
+					{"type":"tool_result","tool_use_id":"toolu_123","content":"created"}
+				]`),
+			},
+		},
+	}
+
+	openaiReq, err := NewRequestTransformer().TransformRequest(req, config.ModelConfig{ModelID: "glm-5.3"})
+	if err != nil {
+		t.Fatalf("TransformRequest() error = %v", err)
+	}
+
+	var got []string
+	for _, m := range openaiReq.Messages {
+		got = append(got, m.Role+":"+m.ToolCallID+m.ContentText())
+	}
+	want := []string{"assistant:", "tool:toolu_123created", "user:now continue"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("messages = %q, want %q", got, want)
 	}
 }
 

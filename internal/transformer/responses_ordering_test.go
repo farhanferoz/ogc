@@ -71,6 +71,40 @@ func TestNormalizedToResponses_PreservesContentBlockOrder(t *testing.T) {
 	}
 }
 
+// TestNormalizedToResponses_RepairedHistoryAnswersCallFirst pins the ordering
+// the Responses translation takes from the repair: NormalizedToResponses emits
+// blocks in order, so a user message [text, tool_result] yields the output
+// directly after its call only because core.RepairDanglingToolCalls moves the
+// tool_result ahead of the text.
+func TestNormalizedToResponses_RepairedHistoryAnswersCallFirst(t *testing.T) {
+	req := &types.MessageRequest{
+		Model: "gpt-5.6-luna",
+		Messages: []types.Message{
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"call_a","name":"lookup","input":{"q":"one"}}]`)},
+			{Role: "user", Content: json.RawMessage(`[
+				{"type":"text","text":"now continue"},
+				{"type":"tool_result","tool_use_id":"call_a","content":"result"}
+			]`)},
+		},
+	}
+	req.Messages = core.RepairDanglingToolCalls(req.Messages)
+
+	input := NormalizedToResponses(core.NormalizeRequest(req), config.ModelConfig{ModelID: "gpt-5.6-luna"}).Input
+
+	if len(input) != 3 {
+		t.Fatalf("input count = %d, want 3: %+v", len(input), input)
+	}
+	if got := input[0]; got.Type != "function_call" || got.CallID != "call_a" {
+		t.Errorf("input[0] = %+v, want function_call call_a", got)
+	}
+	if got := input[1]; got.Type != "function_call_output" || got.CallID != "call_a" {
+		t.Errorf("input[1] = %+v, want function_call_output call_a", got)
+	}
+	if got := responsesInputText(t, input[2]); got != "now continue" {
+		t.Errorf("input[2] text = %q, want now continue", got)
+	}
+}
+
 func responsesInputText(t *testing.T, input types.ResponsesInput) string {
 	t.Helper()
 	var text string

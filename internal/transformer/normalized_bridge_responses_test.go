@@ -115,12 +115,11 @@ func TestNormalizedToResponses_AssistantToolUseMessage(t *testing.T) {
 
 	responsesReq := NormalizedToResponses(req, config.ModelConfig{ModelID: "muse-spark-1.2-contributor"})
 
-	// The request ends on the assistant's tool_use with no function_call_output
-	// ever following it, so fixResponsesCallOrdering synthesizes a placeholder
-	// output for t1 to satisfy the Responses API's "every function_call must
-	// be answered" rule — hence 2 input items, not 1.
-	if len(responsesReq.Input) != 2 {
-		t.Fatalf("input count = %d, want 2", len(responsesReq.Input))
+	// Answers for interrupted calls are added before translation
+	// (core.RepairDanglingToolCalls), so a history ending on the tool_use
+	// translates to the function_call item alone.
+	if len(responsesReq.Input) != 1 {
+		t.Fatalf("input count = %d, want 1", len(responsesReq.Input))
 	}
 	item := responsesReq.Input[0]
 	if item.Type != "function_call" {
@@ -134,13 +133,6 @@ func TestNormalizedToResponses_AssistantToolUseMessage(t *testing.T) {
 	}
 	if item.Arguments != `{"location":"SF"}` {
 		t.Errorf("arguments = %q, want the raw JSON", item.Arguments)
-	}
-	output := responsesReq.Input[1]
-	if output.Type != "function_call_output" {
-		t.Errorf("Input[1] type = %q, want function_call_output", output.Type)
-	}
-	if output.CallID != "t1" {
-		t.Errorf("Input[1] call_id = %q, want t1", output.CallID)
 	}
 }
 

@@ -528,6 +528,11 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 		"reason", routeResult.Reason,
 	)
 
+	// Answer interrupted tool calls once, on the Anthropic history, so every
+	// translation below (NormalizeRequest and TransformRequest) starts from a
+	// history where each tool_use has exactly one tool_result.
+	anthropicReq.Messages = core.RepairDanglingToolCalls(anthropicReq.Messages)
+
 	normalizeStart := time.Now()
 	normalizedReq := core.NormalizeRequest(&anthropicReq)
 	normalizedReq.Stream = isStreaming

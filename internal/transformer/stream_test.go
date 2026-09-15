@@ -1674,7 +1674,20 @@ func TestProxyResponsesStream_PreservesBufferedToolArguments(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				w := newMockResponseWriter()
-				if err := NewStreamHandler().ProxyResponsesStream(w, sseLines(lines...), "test", ctx, 0, cancel); err != nil {
+				err = NewStreamHandler().ProxyResponsesStream(w, sseLines(lines...), "test", ctx, 0, cancel)
+
+				if completion == "EOF" {
+					// A stream that ends with neither response.completed nor
+					// response.incomplete is truncated, not a clean end — the
+					// buffered-argument flush below is for a tool call left
+					// open by a completed response, not for a connection that
+					// never confirmed completion at all.
+					if err == nil {
+						t.Fatal("expected an error for a stream that ended with no response.completed, got nil")
+					}
+					return
+				}
+				if err != nil {
 					t.Fatal(err)
 				}
 				events := parseSSEEvents(t, w.buf.String())
@@ -2029,5 +2042,99 @@ func TestProxyResponsesStream_TerminalUsageMissing(t *testing.T) {
 	}
 	if delta.Usage.InputTokens != 0 || delta.Usage.OutputTokens != 0 {
 		t.Errorf("event[4].Usage = %+v, want 0/0", delta.Usage)
+	}
+}
+
+// TestProxyResponsesStream_CompletedIsCleanFinish pins the base case: a
+// stream that delivers content and then response.completed closes normally.
+func TestProxyResponsesStream_CompletedIsCleanFinish(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"type":"response.output_text.delta","delta":"Hi"}`,
+		`{"type":"response.completed"}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyResponsesStream(w, body, "gpt-5.6-luna", ctx, 0, cancel); err != nil {
+		t.Fatalf("ProxyResponsesStream error: %v", err)
+	}
+
+	out := w.buf.String()
+	if !strings.Contains(out, "message_stop") {
+		t.Errorf("expected a normal message_stop, got: %s", out)
+	}
+}
+
+// TestProxyResponsesStream_EOFWithoutCompletedFails pins the truncation case
+// this change closes: a stream that delivers content but ends at EOF with no
+// response.completed (or response.incomplete) is cut off, not complete. Live
+// gpt-5.6-luna and grok-4.6 Responses streams always send response.completed.
+func TestProxyResponsesStream_EOFWithoutCompletedFails(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"type":"response.output_text.delta","delta":"Hi"}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := handler.ProxyResponsesStream(w, body, "gpt-5.6-luna", ctx, 0, cancel)
+	if err == nil {
+		t.Fatal("expected an error for a Responses stream that ended without response.completed, got nil")
+	}
+}
+
+// TestProxyResponsesStream_TrailingPingAfterCompletedIsCleanFinish pins that
+// the trailing "ping" event live upstreams send after response.completed
+// does not undo completion or otherwise break the clean finish.
+func TestProxyResponsesStream_TrailingPingAfterCompletedIsCleanFinish(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"type":"response.output_text.delta","delta":"Hi"}`,
+		`{"type":"response.completed"}`,
+		`{"type":"ping"}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyResponsesStream(w, body, "grok-4.6", ctx, 0, cancel); err != nil {
+		t.Fatalf("ProxyResponsesStream error: %v", err)
+	}
+
+	out := w.buf.String()
+	if !strings.Contains(out, "message_stop") {
+		t.Errorf("expected a normal message_stop after the trailing ping, got: %s", out)
+	}
+}
+
+// TestProxyResponsesStream_FailedEventFails pins that a response.failed
+// event is surfaced as an error immediately, rather than closed as a normal
+// completion — even if a (spurious) response.completed follows it, which a
+// naive implementation that only checked "was any terminal event seen by
+// EOF" would incorrectly treat as a clean finish. Not observed live (per the
+// task brief); response.failed is part of OpenAI's documented Responses
+// event set and carries status "failed" with error details, distinct from
+// the terminal-but-successful response.incomplete state.
+func TestProxyResponsesStream_FailedEventFails(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"type":"response.output_text.delta","delta":"Hi"}`,
+		`{"type":"response.failed","response":{"status":"failed"}}`,
+		`{"type":"response.completed"}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := handler.ProxyResponsesStream(w, body, "gpt-5.6-luna", ctx, 0, cancel)
+	if err == nil {
+		t.Fatal("expected an error for a response.failed event, got nil")
 	}
 }

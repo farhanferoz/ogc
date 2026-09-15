@@ -538,10 +538,13 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	normalizedReq.Stream = isStreaming
 	// Native /v1/messages models get the client's own body with the repaired
 	// history, so fields the normalized request has no slot for reach them.
-	if body, err := core.SetTopLevelFields(sanitizeAnthropicBody(rawBody), map[string]any{"messages": anthropicReq.Messages}); err == nil {
-		normalizedReq.RawBody = body
-	} else {
-		h.logger.Warn("could not keep client body for native passthrough", "error", err)
+	// Only re-encoded when the chain holds such a model: the body is large.
+	if h.anthropicWireInChain(modelChain) {
+		if body, err := core.SetTopLevelFields(sanitizeAnthropicBody(rawBody), map[string]any{"messages": anthropicReq.Messages}); err == nil {
+			normalizedReq.RawBody = body
+		} else {
+			h.logger.Warn("could not keep client body for native passthrough", "error", err)
+		}
 	}
 	h.metrics.RecordStage(metrics.StageNormalization, time.Since(normalizeStart))
 	modelChain, err = h.filterCompatibleModels(modelChain, normalizedReq)
@@ -561,6 +564,21 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	} else {
 		h.handleNonStreaming(w, r, &anthropicReq, normalizedReq, modelChain, rawBody, routeResult.Scenario, requestID)
 	}
+}
+
+// anthropicWireInChain reports whether any model in the chain speaks the
+// native Anthropic wire format, and so needs the client's own request body.
+func (h *MessagesHandler) anthropicWireInChain(chain []config.ModelConfig) bool {
+	if h.providerRegistry == nil {
+		return false
+	}
+	for _, model := range chain {
+		if prov, ok := h.providerRegistry.Get(client.Provider(model)); ok &&
+			prov.WireFormat(model) == core.WireFormatAnthropic {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *MessagesHandler) filterCompatibleModels(chain []config.ModelConfig, req *core.NormalizedRequest) ([]config.ModelConfig, error) {

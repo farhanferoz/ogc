@@ -850,15 +850,13 @@ func (h *MessagesHandler) handleStreaming(
 				streamReader := transformer.NewCtxReadCloser(attemptCtx, streamBody)
 
 				wireFormat := prov.WireFormat(model)
-				if wireFormat == core.WireFormatAnthropic {
-					atomic.StoreInt32(&heartbeatPaused, 1)
-				}
+				// Native Anthropic passthrough relays whole SSE events under rw's
+				// own write lock (see proxyAnthropicPassthroughStream), so a
+				// keepalive ping can only land between events, never inside one —
+				// the heartbeat no longer needs to be paused for this wire format.
 				transformStart := time.Now()
 				errProxy := h.streamProxy.ProxyStream(rw, streamReader, wireFormat, model.ModelID, attemptCtx, idleTimeout, cancelAttempt)
 				h.metrics.RecordStage(metrics.StageResponseTransform, time.Since(transformStart))
-				if wireFormat == core.WireFormatAnthropic {
-					atomic.StoreInt32(&heartbeatPaused, 0)
-				}
 				if errProxy != nil {
 					if errProxy == transformer.ErrClientDisconnected {
 						if clientCtx.Err() != nil {

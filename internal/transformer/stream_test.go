@@ -1128,11 +1128,19 @@ func TestProxyStream_NoUsageFallback(t *testing.T) {
 	}
 }
 
+// TestProxyStream_NoFinishReasonFallback pins the fallback for a stream that
+// delivers content, sends the data: [DONE] sentinel, but never sends an
+// explicit finish_reason chunk: [DONE] on its own means the upstream
+// considers the turn complete, so stop_reason falls back to end_turn rather
+// than the stream being treated as cut off. Live OpenCode Go chat streams
+// always send a finish_reason, [DONE], or both, so EOF with neither is what
+// actually means "truncated" (see TestProxyStream_NoFinishReasonNoDoneFails).
 func TestProxyStream_NoFinishReasonFallback(t *testing.T) {
 	handler := NewStreamHandler()
 	w := newMockResponseWriter()
 	body := sseLines(
 		`{"choices":[{"delta":{"content":"Hello"}}]}`,
+		"[DONE]",
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1160,14 +1168,17 @@ func TestProxyStream_NoFinishReasonFallback(t *testing.T) {
 }
 
 // TestProxyStream_EOFFallbackStopReasonToolUse verifies that when the stream
-// ends mid-tool-call (no finish_reason), the EOF fallback sets stop_reason
-// to "tool_use" rather than "end_turn".
+// ends mid-tool-call with no finish_reason but does send [DONE], the EOF
+// fallback sets stop_reason to "tool_use" rather than "end_turn". [DONE]
+// alone means the upstream considers the turn complete even without an
+// explicit finish_reason.
 func TestProxyStream_EOFFallbackStopReasonToolUse(t *testing.T) {
 	handler := NewStreamHandler()
 	w := newMockResponseWriter()
 	body := sseLines(
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_abc","type":"function","function":{"name":"read_file","arguments":""}}]}}]}`,
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"/tmp/test\"}"}}]}}]}`,
+		"[DONE]",
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1192,6 +1203,25 @@ func TestProxyStream_EOFFallbackStopReasonToolUse(t *testing.T) {
 	}
 	if msgDelta.Delta == nil || msgDelta.Delta.StopReason != "tool_use" {
 		t.Errorf("stop_reason = %q, want tool_use (stream ended mid-tool-call)", msgDelta.Delta.StopReason)
+	}
+}
+
+// TestProxyStream_NoFinishReasonNoDoneFails pins the actual truncation case:
+// a stream that delivers content but ends at EOF with neither a
+// finish_reason chunk nor the [DONE] sentinel is cut off, not complete.
+func TestProxyStream_NoFinishReasonNoDoneFails(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"content":"Hello"}}]}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := handler.ProxyStream(w, body, "qwen3.6-plus", ctx, 0, cancel)
+	if err == nil {
+		t.Fatal("expected an error for a stream that ended with neither a finish_reason nor [DONE], got nil")
 	}
 }
 
@@ -1329,6 +1359,54 @@ func TestProxyStream_UpstreamErrorBeforeFinishReasonStillFails(t *testing.T) {
 	err := handler.ProxyStream(w, &bodyThenErrReader{body: []byte(body), err: io.ErrUnexpectedEOF}, "kimi-k2.6", ctx, 0, cancel)
 	if err == nil {
 		t.Fatal("ProxyStream() error = nil, want error so the handler can fall back")
+	}
+}
+
+// TestProxyStream_InStreamErrorObjectFails pins that a chunk carrying a
+// non-null "error" object is surfaced as an error rather than silently
+// dropped (the chunk has no "choices", so without this check processSSELine
+// would just return nil and the stream would close as if it were healthy).
+func TestProxyStream_InStreamErrorObjectFails(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"content":"partial"}}]}`,
+		`{"error":{"message":"upstream exploded","type":"server_error"}}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := handler.ProxyStream(w, body, "kimi-k2.6", ctx, 0, cancel)
+	if err == nil {
+		t.Fatal("expected an error for a chunk carrying an in-stream error object, got nil")
+	}
+}
+
+// TestProxyStream_NullErrorFieldIsNotAnError pins that a literal
+// `"error": null` field — sent by some upstreams on every healthy chunk — is
+// NOT treated as an in-stream error, unlike a populated error object.
+func TestProxyStream_NullErrorFieldIsNotAnError(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"content":"hi"}}],"error":null}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}],"error":null}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyStream(w, body, "kimi-k2.6", ctx, 0, cancel); err != nil {
+		t.Fatalf("ProxyStream error: %v (a literal \"error\": null must not be treated as an in-stream error)", err)
+	}
+
+	out := w.buf.String()
+	if !strings.Contains(out, "hi") {
+		t.Errorf("expected content to reach the client despite the null error field, got: %s", out)
+	}
+	if !strings.Contains(out, "message_stop") {
+		t.Errorf("expected a normal message_stop, got: %s", out)
 	}
 }
 

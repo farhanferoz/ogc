@@ -1709,6 +1709,23 @@ func TestResponseWriter_ConcurrentWrites(t *testing.T) {
 	}
 }
 
+// deadlineAwareRecorder wraps httptest.ResponseRecorder with a no-op
+// SetWriteDeadline so http.NewResponseController(...).SetWriteDeadline
+// succeeds instead of failing with http.ErrNotSupported. A bare
+// httptest.ResponseRecorder doesn't implement SetWriteDeadline, so the
+// keepalive heartbeat (which calls it on every tick) fails and permanently
+// stops itself on the very first tick — any test that needs to observe a
+// real keepalive firing must use this instead of httptest.NewRecorder().
+type deadlineAwareRecorder struct {
+	*httptest.ResponseRecorder
+}
+
+func newDeadlineAwareRecorder() *deadlineAwareRecorder {
+	return &deadlineAwareRecorder{ResponseRecorder: httptest.NewRecorder()}
+}
+
+func (w *deadlineAwareRecorder) SetWriteDeadline(time.Time) error { return nil }
+
 type blockingFlushWriter struct {
 	http.ResponseWriter
 	flushStarted chan struct{}
@@ -1818,7 +1835,20 @@ func TestKeepaliveHeartbeat_NonPositiveDurationsUseDefaults(t *testing.T) {
 	stop()
 }
 
+// TestHandleStreaming_AnthropicRaw_NoKeepaliveInjection used to pin that the
+// heartbeat is paused for the whole duration of a native Anthropic
+// passthrough stream, so no keepalive comment could ever appear in it. Native
+// passthrough now relays whole SSE events under the response writer's own
+// write lock instead (see proxyAnthropicPassthroughStream), so a keepalive
+// can land between events but never split one. This exercises the
+// provider-registry path (the one production actually uses for opencode-go
+// streaming — see newProviderRegistryTestHandler) rather than the legacy
+// client path, since only the former had its heartbeat pause removed.
 func TestHandleStreaming_AnthropicRaw_NoKeepaliveInjection(t *testing.T) {
+	const startEvent = "event: message_start\ndata: {\"type\":\"message_start\"}\n\n"
+	const deltaEvent = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"
+	const stopEvent = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
 	blockCh := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1826,7 +1856,7 @@ func TestHandleStreaming_AnthropicRaw_NoKeepaliveInjection(t *testing.T) {
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+		_, _ = io.WriteString(w, startEvent)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -1834,14 +1864,15 @@ func TestHandleStreaming_AnthropicRaw_NoKeepaliveInjection(t *testing.T) {
 		case <-blockCh:
 		case <-time.After(10 * time.Second):
 		}
-		_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n")
+		_, _ = io.WriteString(w, deltaEvent)
+		_, _ = io.WriteString(w, stopEvent)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
 	}))
 	defer upstream.Close()
 
-	handler := newStreamingTestHandler(t, upstream.URL)
+	handler := newProviderRegistryTestHandler(t, upstream.URL)
 
 	rawBody := json.RawMessage(`{
 		"model": "claude-opus-4-8",
@@ -1859,7 +1890,9 @@ func TestHandleStreaming_AnthropicRaw_NoKeepaliveInjection(t *testing.T) {
 		{Provider: "opencode-go", ModelID: "minimax-m3"},
 	}
 
-	recorder := httptest.NewRecorder()
+	// A real keepalive heartbeat is under test here, so the recorder must
+	// support SetWriteDeadline (see deadlineAwareRecorder's doc comment).
+	recorder := newDeadlineAwareRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	ctx, cancel := context.WithCancel(req.Context())
 	defer cancel()
@@ -1870,7 +1903,8 @@ func TestHandleStreaming_AnthropicRaw_NoKeepaliveInjection(t *testing.T) {
 		handler.handleStreaming(recorder, req.WithContext(ctx), &anthropicReq, &core.NormalizedRequest{Stream: true}, chain, rawBody, router.Scenario(""), "")
 	}()
 
-	time.Sleep(1000 * time.Millisecond)
+	// Stall past the 3s default keepalive interval so a ping actually fires.
+	time.Sleep(3500 * time.Millisecond)
 	close(blockCh)
 
 	select {
@@ -1881,15 +1915,24 @@ func TestHandleStreaming_AnthropicRaw_NoKeepaliveInjection(t *testing.T) {
 
 	body := recorder.Body.String()
 
-	if !strings.Contains(body, "message_start") {
-		t.Error("output missing message_start event")
+	if !strings.Contains(body, startEvent) {
+		t.Errorf("message_start event bytes not found intact in output:\n%s", body)
 	}
-	if !strings.Contains(body, "content_block_delta") {
-		t.Error("output missing content_block_delta event")
+	if !strings.Contains(body, deltaEvent) {
+		t.Errorf("content_block_delta event bytes not found intact in output:\n%s", body)
+	}
+	if !strings.Contains(body, ":keepalive") {
+		t.Error("expected at least one keepalive ping during the multi-second stall (heartbeat is no longer paused for native passthrough)")
 	}
 
-	if strings.Contains(body, ":keepalive") {
-		t.Errorf("keepalive comment leaked into Anthropic raw stream output (concurrent write bug):\n%s", body)
+	startIdx := strings.Index(body, startEvent)
+	deltaIdx := strings.Index(body, deltaEvent)
+	if startIdx == -1 || deltaIdx == -1 || deltaIdx < startIdx {
+		t.Fatalf("could not locate both events in order:\n%s", body)
+	}
+	between := body[startIdx+len(startEvent) : deltaIdx]
+	if !strings.Contains(between, ":keepalive") {
+		t.Errorf("expected the keepalive(s) to land strictly between message_start and content_block_delta, got:\n%q", between)
 	}
 }
 

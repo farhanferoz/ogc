@@ -1128,14 +1128,88 @@ func TestProxyStream_NoUsageFallback(t *testing.T) {
 	}
 }
 
-// TestProxyStream_NoFinishReasonFallback used to pin a fallback: a stream
-// that delivered content then closed cleanly with no finish_reason chunk was
-// treated as a complete message (stop_reason defaulted to end_turn). That
-// fallback is indistinguishable from a truncated stream — Claude Code has no
-// way to tell "this upstream just doesn't send finish_reason" from "this
-// turn got cut off" — so a clean EOF with no finish_reason is now an error
-// instead of a guessed-complete message.
+// TestProxyStream_NoFinishReasonFallback pins the fallback for a stream that
+// delivers content, sends the data: [DONE] sentinel, but never sends an
+// explicit finish_reason chunk: [DONE] on its own means the upstream
+// considers the turn complete, so stop_reason falls back to end_turn rather
+// than the stream being treated as cut off. Live OpenCode Go chat streams
+// always send a finish_reason, [DONE], or both, so EOF with neither is what
+// actually means "truncated" (see TestProxyStream_NoFinishReasonNoDoneFails).
 func TestProxyStream_NoFinishReasonFallback(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"content":"Hello"}}]}`,
+		"[DONE]",
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyStream(w, body, "qwen3.6-plus", ctx, 0, cancel); err != nil {
+		t.Fatalf("ProxyStream error: %v", err)
+	}
+
+	events := parseSSEEvents(t, w.buf.String())
+	// Expected events:
+	// 0: message_start
+	// 1: content_block_start
+	// 2: content_block_delta
+	// 3: content_block_stop
+	// 4: message_delta (fallback stop_reason: end_turn)
+	// 5: message_stop
+	if len(events) != 6 {
+		t.Fatalf("expected 6 events, got %d: %+v", len(events), events)
+	}
+
+	if events[4].Type != "message_delta" || events[4].Delta == nil || events[4].Delta.StopReason != "end_turn" {
+		t.Errorf("event[4] = %+v, want message_delta(end_turn)", events[4])
+	}
+}
+
+// TestProxyStream_EOFFallbackStopReasonToolUse verifies that when the stream
+// ends mid-tool-call with no finish_reason but does send [DONE], the EOF
+// fallback sets stop_reason to "tool_use" rather than "end_turn". [DONE]
+// alone means the upstream considers the turn complete even without an
+// explicit finish_reason.
+func TestProxyStream_EOFFallbackStopReasonToolUse(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_abc","type":"function","function":{"name":"read_file","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"/tmp/test\"}"}}]}}]}`,
+		"[DONE]",
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyStream(w, body, "kimi-k2.6", ctx, 0, cancel); err != nil {
+		t.Fatalf("ProxyStream error: %v", err)
+	}
+
+	events := parseSSEEvents(t, w.buf.String())
+
+	var msgDelta *types.MessageEvent
+	for i := range events {
+		if events[i].Type == "message_delta" {
+			msgDelta = &events[i]
+			break
+		}
+	}
+	if msgDelta == nil {
+		t.Fatalf("expected message_delta event, got none: %+v", events)
+		return
+	}
+	if msgDelta.Delta == nil || msgDelta.Delta.StopReason != "tool_use" {
+		t.Errorf("stop_reason = %q, want tool_use (stream ended mid-tool-call)", msgDelta.Delta.StopReason)
+	}
+}
+
+// TestProxyStream_NoFinishReasonNoDoneFails pins the actual truncation case:
+// a stream that delivers content but ends at EOF with neither a
+// finish_reason chunk nor the [DONE] sentinel is cut off, not complete.
+func TestProxyStream_NoFinishReasonNoDoneFails(t *testing.T) {
 	handler := NewStreamHandler()
 	w := newMockResponseWriter()
 	body := sseLines(
@@ -1147,29 +1221,7 @@ func TestProxyStream_NoFinishReasonFallback(t *testing.T) {
 
 	err := handler.ProxyStream(w, body, "qwen3.6-plus", ctx, 0, cancel)
 	if err == nil {
-		t.Fatal("expected an error for a stream that ended without a finish_reason, got nil")
-	}
-}
-
-// TestProxyStream_EOFFallbackStopReasonToolUse used to verify that when the
-// stream ends mid-tool-call with no finish_reason, the EOF fallback set
-// stop_reason to "tool_use" and closed the message anyway. A stream ending
-// mid-tool-call with no finish_reason is truncated, not complete, so it is
-// now surfaced as an error instead of a guessed-complete tool_use message.
-func TestProxyStream_EOFFallbackStopReasonToolUse(t *testing.T) {
-	handler := NewStreamHandler()
-	w := newMockResponseWriter()
-	body := sseLines(
-		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_abc","type":"function","function":{"name":"read_file","arguments":""}}]}}]}`,
-		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"/tmp/test\"}"}}]}}]}`,
-	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	err := handler.ProxyStream(w, body, "kimi-k2.6", ctx, 0, cancel)
-	if err == nil {
-		t.Fatal("expected an error for a stream that ended mid-tool-call with no finish_reason, got nil")
+		t.Fatal("expected an error for a stream that ended with neither a finish_reason nor [DONE], got nil")
 	}
 }
 

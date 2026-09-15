@@ -244,6 +244,7 @@ func (h *StreamHandler) ProxyStream(
 	toolUseCount := 0
 	startedToolCalls := make(map[int]int) // maps OpenAI tool call index → Anthropic content block index
 	decodeErrors := 0                     // consecutive SSE decode failures
+	sawDone := false                      // saw a data: [DONE] sentinel
 
 	// Get a buffer from the pool; return it when done.
 	readBuf := readBufPool.Get().(*[]byte)
@@ -326,7 +327,7 @@ func (h *StreamHandler) ProxyStream(
 				b := (*readBuf)[i]
 				if b == '\n' {
 					// Process complete line
-					if err := h.processSSELine(w, flusher, lineBuf, &contentIndex, &contentStarted, &reasoningStarted, &terminalStopReason, &terminalUsage, &toolUseCount, startedToolCalls, originalModel, &decodeErrors); err != nil {
+					if err := h.processSSELine(w, flusher, lineBuf, &contentIndex, &contentStarted, &reasoningStarted, &terminalStopReason, &terminalUsage, &toolUseCount, startedToolCalls, originalModel, &decodeErrors, &sawDone); err != nil {
 						return err
 					}
 					lineBuf = lineBuf[:0]
@@ -339,7 +340,7 @@ func (h *StreamHandler) ProxyStream(
 		if err == io.EOF {
 			// Process any remaining data in buffer
 			if len(lineBuf) > 0 {
-				if err := h.processSSELine(w, flusher, lineBuf, &contentIndex, &contentStarted, &reasoningStarted, &terminalStopReason, &terminalUsage, &toolUseCount, startedToolCalls, originalModel, &decodeErrors); err != nil {
+				if err := h.processSSELine(w, flusher, lineBuf, &contentIndex, &contentStarted, &reasoningStarted, &terminalStopReason, &terminalUsage, &toolUseCount, startedToolCalls, originalModel, &decodeErrors, &sawDone); err != nil {
 					return err
 				}
 			}
@@ -367,13 +368,15 @@ func (h *StreamHandler) ProxyStream(
 		}
 	}
 
-	if terminalStopReason == "" {
+	if terminalStopReason == "" && !sawDone {
 		// The upstream connection closed cleanly (EOF) but never sent a
-		// finish_reason chunk. Closing this as a normal message_stop would
-		// hand Claude Code a message that looks complete but is actually
+		// finish_reason chunk or a data: [DONE] sentinel — live OpenCode Go
+		// chat streams always send at least one of the two on a normal
+		// completion. Closing this as a normal message_stop would hand
+		// Claude Code a message that looks complete but is actually
 		// truncated; surface it as an error instead so the caller can retry
 		// or report the failure rather than silently losing the turn.
-		return fmt.Errorf("upstream stream ended without a finish_reason")
+		return fmt.Errorf("upstream stream ended without a finish_reason or [DONE]")
 	}
 	return finishStream()
 }
@@ -393,6 +396,7 @@ func (h *StreamHandler) processSSELine(
 	startedToolCalls map[int]int,
 	originalModel string,
 	decodeErrors *int,
+	sawDone *bool,
 ) error {
 	line = bytes.TrimSpace(line)
 
@@ -411,8 +415,12 @@ func (h *StreamHandler) processSSELine(
 		return nil
 	}
 
-	// Handle [DONE] marker
+	// Handle [DONE] marker. Live OpenCode Go chat streams always send both a
+	// finish_reason chunk and [DONE]; [DONE] with no finish_reason still
+	// means the upstream considers the turn complete (e.g. a tool-only turn),
+	// so it counts as a clean end on its own, same as a finish_reason chunk.
 	if bytes.Equal(data, []byte("[DONE]")) {
+		*sawDone = true
 		return nil
 	}
 

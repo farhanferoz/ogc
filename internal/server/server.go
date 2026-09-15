@@ -16,6 +16,7 @@ import (
 	"github.com/routatic/proxy/internal/config"
 	"github.com/routatic/proxy/internal/core"
 	"github.com/routatic/proxy/internal/debug"
+	"github.com/routatic/proxy/internal/gomodels"
 	"github.com/routatic/proxy/internal/gui"
 	"github.com/routatic/proxy/internal/handlers"
 	"github.com/routatic/proxy/internal/history"
@@ -213,6 +214,15 @@ func (s *Server) Metrics() *metrics.Metrics {
 // Storage returns the SQLite storage instance.
 func (s *Server) Storage() *storage.Database {
 	return s.storage
+}
+
+// SetGoModelsSnapshot swaps the live OpenCode Go model list the router falls
+// back to for a model that is in neither cfg.Models nor the models.dev
+// catalog. The caller (a background refresher, or a one-time load of the
+// on-disk snapshot at startup) never needs to reach into the model router
+// itself.
+func (s *Server) SetGoModelsSnapshot(snap *gomodels.Snapshot) {
+	s.modelRouter.SetGoModelsSnapshot(snap)
 }
 
 // Start starts the server with graceful shutdown.

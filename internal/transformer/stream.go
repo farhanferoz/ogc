@@ -417,12 +417,14 @@ func (h *StreamHandler) processSSELine(
 	}
 
 	// Fast path: check if this is a content chunk without full JSON parsing.
-	// Skip the fast path when reasoning_content is also present in the same
-	// chunk — falling through to JSON parsing ensures both fields are handled
-	// correctly. Otherwise reasoning_content gets silently dropped, and on the
-	// next turn DeepSeek rejects the request with:
+	// Skip the fast path when reasoning_content or the bare reasoning key is
+	// also present in the same chunk — falling through to JSON parsing
+	// ensures both fields are handled correctly. Otherwise reasoning content
+	// gets silently dropped, and on the next turn DeepSeek rejects the
+	// request with:
 	//   "The reasoning_content in the thinking mode must be passed back to the API."
 	if !bytes.Contains(data, []byte(`"reasoning_content"`)) &&
+		!bytes.Contains(data, []byte(`"reasoning"`)) &&
 		!bytes.Contains(data, []byte(`"finish_reason"`)) &&
 		!bytes.Contains(data, []byte(`"tool_calls"`)) &&
 		!bytes.Contains(data, []byte(`"usage"`)) {
@@ -521,8 +523,16 @@ func (h *StreamHandler) processSSELine(
 
 	choice := chunk.Choices[0]
 
-	// Handle reasoning content deltas
+	// Handle reasoning content deltas. Some upstreams (Kimi, DeepSeek R1) use
+	// the bare "reasoning" key instead of "reasoning_content"; reasoning_content
+	// wins if both are somehow present in the same chunk.
+	reasoningText := ""
 	if choice.Delta.ReasoningContent != nil && *choice.Delta.ReasoningContent != "" {
+		reasoningText = *choice.Delta.ReasoningContent
+	} else if choice.Delta.Reasoning != nil && *choice.Delta.Reasoning != "" {
+		reasoningText = *choice.Delta.Reasoning
+	}
+	if reasoningText != "" {
 		if !*reasoningStarted {
 			// If text was already started, close it first
 			if *contentStarted {
@@ -549,7 +559,7 @@ func (h *StreamHandler) processSSELine(
 
 		delta := types.Delta{
 			Type:     "thinking_delta",
-			Thinking: *choice.Delta.ReasoningContent,
+			Thinking: reasoningText,
 		}
 		event := types.MessageEvent{
 			Type:  "content_block_delta",

@@ -460,7 +460,7 @@ func (t *RequestTransformer) fixToolMessageOrdering(messages []types.ChatMessage
 				if toolCallsNeeded[tc.ID] {
 					result = append(result, types.ChatMessage{
 						Role:       "tool",
-						Content:    contentText("[Operation interrupted by user]"),
+						Content:    contentText(interruptedToolCallPlaceholder),
 						ToolCallID: tc.ID,
 					})
 				}

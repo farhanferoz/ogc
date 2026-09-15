@@ -44,9 +44,7 @@ func NormalizedToAnthropic(req *core.NormalizedRequest, model config.ModelConfig
 
 // interruptedToolCallPlaceholder is the synthetic answer inserted for a tool
 // call that never got a real result (e.g. the user interrupted it with
-// Ctrl+C). Mirrors the placeholder text RequestTransformer.
-// fixToolMessageOrdering uses for the same scenario on the chat-completions
-// translation (internal/transformer/request.go).
+// Ctrl+C), on both the chat-completions and Responses translations.
 const interruptedToolCallPlaceholder = "[Operation interrupted by user]"
 
 // NormalizedToResponses converts a NormalizedRequest to a ResponsesRequest.

@@ -2,6 +2,7 @@ package transformer
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/routatic/proxy/internal/config"
@@ -21,16 +22,17 @@ func answeredToolCallIDs(messages []types.ChatMessage, i int) []string {
 	return ids
 }
 
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+// lastAssistantIndex returns the index of the last assistant message, failing
+// the test when there is none.
+func lastAssistantIndex(t *testing.T, messages []types.ChatMessage) int {
+	t.Helper()
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" {
+			return i
 		}
 	}
-	return true
+	t.Fatalf("no assistant message found in %+v", messages)
+	return -1
 }
 
 // TestTransformRequest_ToolMessageOrdering exercises
@@ -66,22 +68,14 @@ func TestTransformRequest_ToolMessageOrdering(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		asstIdx := -1
-		for i, m := range openaiReq.Messages {
-			if m.Role == "assistant" {
-				asstIdx = i
-			}
-		}
-		if asstIdx == -1 {
-			t.Fatalf("no assistant message found in %+v", openaiReq.Messages)
-		}
+		asstIdx := lastAssistantIndex(t, openaiReq.Messages)
 		got := answeredToolCallIDs(openaiReq.Messages, asstIdx)
 		want := []string{"toolu_01"}
-		if !equalStrings(got, want) {
+		if !slices.Equal(got, want) {
 			t.Errorf("answered tool_call_ids = %v, want %v (message order should be unchanged)", got, want)
 		}
 		for _, m := range openaiReq.Messages {
-			if m.Role == "tool" && m.ContentText() == "[Operation interrupted by user]" {
+			if m.Role == "tool" && m.ContentText() == interruptedToolCallPlaceholder {
 				t.Errorf("no synthetic response should have been inserted, got one: %+v", m)
 			}
 		}
@@ -106,18 +100,10 @@ func TestTransformRequest_ToolMessageOrdering(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		asstIdx := -1
-		for i, m := range openaiReq.Messages {
-			if m.Role == "assistant" {
-				asstIdx = i
-			}
-		}
-		if asstIdx == -1 {
-			t.Fatalf("no assistant message found in %+v", openaiReq.Messages)
-		}
+		asstIdx := lastAssistantIndex(t, openaiReq.Messages)
 		got := answeredToolCallIDs(openaiReq.Messages, asstIdx)
 		want := []string{"toolu_a", "toolu_b"}
-		if !equalStrings(got, want) {
+		if !slices.Equal(got, want) {
 			t.Fatalf("answered tool_call_ids = %v, want %v", got, want)
 		}
 		for _, id := range want {
@@ -126,8 +112,8 @@ func TestTransformRequest_ToolMessageOrdering(t *testing.T) {
 				m := openaiReq.Messages[j]
 				if m.Role == "tool" && m.ToolCallID == id {
 					found = true
-					if got := m.ContentText(); got != "[Operation interrupted by user]" {
-						t.Errorf("synthetic content for %s = %q, want %q", id, got, "[Operation interrupted by user]")
+					if got := m.ContentText(); got != interruptedToolCallPlaceholder {
+						t.Errorf("synthetic content for %s = %q, want %q", id, got, interruptedToolCallPlaceholder)
 					}
 				}
 			}
@@ -164,17 +150,12 @@ func TestTransformRequest_ToolMessageOrdering(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		asstIdx := -1
-		for i, m := range openaiReq.Messages {
-			if m.Role == "assistant" {
-				asstIdx = i
-			}
-		}
+		asstIdx := lastAssistantIndex(t, openaiReq.Messages)
 		got := answeredToolCallIDs(openaiReq.Messages, asstIdx)
 		// Real response (toolu_b) is placed first, then synthetic responses
 		// for the unanswered calls in their original tool_calls order.
 		want := []string{"toolu_b", "toolu_a", "toolu_c"}
-		if !equalStrings(got, want) {
+		if !slices.Equal(got, want) {
 			t.Fatalf("answered tool_call_ids = %v, want %v", got, want)
 		}
 		for j := asstIdx + 1; j < len(openaiReq.Messages) && openaiReq.Messages[j].Role != "assistant"; j++ {
@@ -185,7 +166,7 @@ func TestTransformRequest_ToolMessageOrdering(t *testing.T) {
 					t.Errorf("toolu_b content = %q, want real result %q", got, "B contents")
 				}
 			case "toolu_a", "toolu_c":
-				if got := m.ContentText(); got != "[Operation interrupted by user]" {
+				if got := m.ContentText(); got != interruptedToolCallPlaceholder {
 					t.Errorf("%s content = %q, want synthetic placeholder", m.ToolCallID, got)
 				}
 			}
@@ -214,21 +195,16 @@ func TestTransformRequest_ToolMessageOrdering(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		asstIdx := -1
-		for i, m := range openaiReq.Messages {
-			if m.Role == "assistant" {
-				asstIdx = i
-			}
-		}
+		asstIdx := lastAssistantIndex(t, openaiReq.Messages)
 		got := answeredToolCallIDs(openaiReq.Messages, asstIdx)
 		// fixToolMessageOrdering does not resort matched tool responses to
 		// follow tool_calls order — it preserves the order they arrived in.
 		want := []string{"toolu_b", "toolu_a"}
-		if !equalStrings(got, want) {
+		if !slices.Equal(got, want) {
 			t.Fatalf("answered tool_call_ids = %v, want %v (arrival order preserved)", got, want)
 		}
 		for _, m := range openaiReq.Messages {
-			if m.Role == "tool" && m.ContentText() == "[Operation interrupted by user]" {
+			if m.Role == "tool" && m.ContentText() == interruptedToolCallPlaceholder {
 				t.Errorf("both calls were answered; no synthetic response expected, got one: %+v", m)
 			}
 		}

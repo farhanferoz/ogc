@@ -933,11 +933,18 @@ func firstAPIKey(keys []string) string {
 func startGoModelsRefresher(atomicCfg *config.AtomicConfig) func() {
 	snapshotPath := gomodels.SnapshotPath(filepath.Dir(atomicCfg.Path()))
 
+	// Stopping cancels a sync in progress: with native checks on, a first
+	// sync can run for minutes, far past the service manager's stop timeout.
+	ctx, cancel := context.WithCancel(context.Background())
+
 	sync := func() {
 		cfg := atomicCfg.Get()
 		previous, _ := gomodels.LoadSnapshot(snapshotPath)
 
-		snap, err := gomodels.SyncAndWrite(context.Background(), goModelsDeps(cfg), snapshotPath)
+		snap, err := gomodels.SyncAndWrite(ctx, goModelsDeps(cfg), snapshotPath)
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil {
 			slog.Warn("go-models sync failed, keeping previous snapshot", "error", err)
 			return
@@ -959,7 +966,6 @@ func startGoModelsRefresher(atomicCfg *config.AtomicConfig) func() {
 			"native_checked", nativeChecked)
 	}
 
-	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -971,7 +977,7 @@ func startGoModelsRefresher(atomicCfg *config.AtomicConfig) func() {
 			}
 			timer := time.NewTimer(time.Duration(hours) * time.Hour)
 			select {
-			case <-stop:
+			case <-ctx.Done():
 				timer.Stop()
 				return
 			case <-timer.C:
@@ -981,7 +987,7 @@ func startGoModelsRefresher(atomicCfg *config.AtomicConfig) func() {
 	}()
 
 	return func() {
-		close(stop)
+		cancel()
 		<-done
 	}
 }

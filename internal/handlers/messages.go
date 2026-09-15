@@ -536,6 +536,13 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	normalizeStart := time.Now()
 	normalizedReq := core.NormalizeRequest(&anthropicReq)
 	normalizedReq.Stream = isStreaming
+	// Native /v1/messages models get the client's own body with the repaired
+	// history, so fields the normalized request has no slot for reach them.
+	if body, err := core.SetTopLevelFields(sanitizeAnthropicBody(rawBody), map[string]any{"messages": anthropicReq.Messages}); err == nil {
+		normalizedReq.RawBody = body
+	} else {
+		h.logger.Warn("could not keep client body for native passthrough", "error", err)
+	}
 	h.metrics.RecordStage(metrics.StageNormalization, time.Since(normalizeStart))
 	modelChain, err = h.filterCompatibleModels(modelChain, normalizedReq)
 	if err != nil {
@@ -1142,15 +1149,7 @@ func replaceModelInRawBody(rawBody json.RawMessage, modelID string) json.RawMess
 	if _, ok := obj["model"]; !ok {
 		return rawBody
 	}
-	encoded, err := json.Marshal(modelID)
-	if err != nil {
-		// json.Marshal on a string should never fail, but guard anyway.
-		slog.Error("failed to marshal model ID for body replacement",
-			"error", err, "model_id", modelID)
-		return rawBody
-	}
-	obj["model"] = encoded
-	result, err := json.Marshal(obj)
+	result, err := core.SetTopLevelFields(rawBody, map[string]any{"model": modelID})
 	if err != nil {
 		slog.Error("could not marshal request body after model replacement, using original",
 			"error", err)

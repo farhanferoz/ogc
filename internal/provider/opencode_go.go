@@ -243,8 +243,7 @@ func (p *OpenCodeGoProvider) executeAnthropic(ctx context.Context, req *core.Nor
 	endpoint := cfg.OpenCodeGo.AnthropicBaseURL
 	apiKey := p.nextAPIKey(cfg.EffectiveAPIKeys())
 
-	anthropicReq := transformer.NormalizedToAnthropic(req, model)
-	rawBody, err := json.Marshal(anthropicReq)
+	rawBody, err := anthropicRequestBody(req, model)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal anthropic request: %w", err)
 	}
@@ -288,8 +287,7 @@ func (p *OpenCodeGoProvider) streamAnthropic(ctx context.Context, req *core.Norm
 	endpoint := cfg.OpenCodeGo.AnthropicBaseURL
 	apiKey := p.nextAPIKey(cfg.EffectiveAPIKeys())
 
-	anthropicReq := transformer.NormalizedToAnthropic(req, model)
-	rawBody, err := json.Marshal(anthropicReq)
+	rawBody, err := anthropicRequestBody(req, model)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal anthropic request: %w", err)
 	}

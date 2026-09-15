@@ -141,6 +141,10 @@ type NormalizedRequest struct {
 	Tools           []NormalizedToolDef
 	ReasoningEffort string // "low", "medium", "high"
 	ThinkingBudget  int    // budget_tokens for thinking mode
+	// RawBody is the client's Anthropic request carrying the repaired history,
+	// forwarded unchanged apart from model and stream to native /v1/messages
+	// upstreams. Empty when the handler could not keep it.
+	RawBody json.RawMessage `json:"-"`
 }
 
 // NormalizedToolDef is a tool definition in the internal format.

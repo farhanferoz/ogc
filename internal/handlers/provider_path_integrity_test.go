@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -285,8 +286,16 @@ func TestProviderPath_TranslatedStream_InStreamErrorObject(t *testing.T) {
 
 func TestProviderPath_NoFallbackAfterPartialContent_OnGenuineError(t *testing.T) {
 	primaryHit := make(chan struct{}, 1)
+	// Counting attempts is what proves the gate: both models in the chain use
+	// this same upstream, so a suppressed retry and an attempted one look
+	// alike in the response body once the connection is severed.
+	var attempts int32
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		primaryHit <- struct{}{}
+		atomic.AddInt32(&attempts, 1)
+		select {
+		case primaryHit <- struct{}{}:
+		default:
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
@@ -355,6 +364,9 @@ func TestProviderPath_NoFallbackAfterPartialContent_OnGenuineError(t *testing.T)
 	// on the same stream after partial content — the bug this behaviour
 	// prevents. Count "event: message_start" lines, not the substring, since
 	// the message_start payload itself also contains the text "message_start".
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("upstream attempts = %d, want exactly 1: the second model was tried after partial content", got)
+	}
 	startCount := strings.Count(body, "event: message_start")
 	if startCount > 1 {
 		t.Errorf("fallback ran on the same stream after partial content: %d message_start events\n%s", startCount, body)

@@ -175,18 +175,27 @@ func serveCmd() *cobra.Command {
 				})
 			}
 
-			// Keep the OpenCode Go model list snapshot fresh in the
-			// background, so new models become usable and retired ones
-			// disappear without a restart or a config edit.
-			if cfg.GoModels.Enabled == nil || *cfg.GoModels.Enabled {
-				stopGoModels := startGoModelsRefresher(atomicCfg)
-				defer stopGoModels()
-			}
-
 			// Create and start server.
 			srv, err := server.NewServer(atomicCfg, captureLogger)
 			if err != nil {
 				return fmt.Errorf("failed to create server: %w", err)
+			}
+
+			// Keep the OpenCode Go model list snapshot fresh in the
+			// background, so new models become usable and retired ones
+			// disappear without a restart or a config edit. Load whatever
+			// was last synced before the server starts listening, so the
+			// fallback is warm from the first request rather than only
+			// after the first background sync completes.
+			if cfg.GoModels.Enabled == nil || *cfg.GoModels.Enabled {
+				snapshotPath := gomodels.SnapshotPath(filepath.Dir(atomicCfg.Path()))
+				if snap, err := gomodels.LoadSnapshot(snapshotPath); err != nil {
+					slog.Warn("go-models: ignoring corrupt snapshot at startup", "path", snapshotPath, "error", err)
+				} else if snap != nil {
+					srv.SetGoModelsSnapshot(snap)
+				}
+				stopGoModels := startGoModelsRefresher(atomicCfg, srv.SetGoModelsSnapshot)
+				defer stopGoModels()
 			}
 
 			// Start config watcher for hot reload (only if enabled in config).
@@ -927,10 +936,13 @@ func firstAPIKey(keys []string) string {
 // startGoModelsRefresher keeps the OpenCode Go model list snapshot fresh in
 // the background: syncs once immediately, then every go_models.refresh_hours,
 // atomically rewriting internal/gomodels' snapshot file beside the config
-// and reloading atomicCfg so newly live models route immediately and
-// retired ones stop being offered — no restart, no config edit required.
+// and calling setSnapshot so newly live models route immediately and
+// retired ones stop being offered — no restart, no config reload required.
+// (setSnapshot is ordinarily *server.Server's SetGoModelsSnapshot; taking it
+// as a func here keeps this package from importing internal/server just for
+// this one call, and keeps the sync loop trivially testable.)
 // The returned func stops the loop and waits for it to exit.
-func startGoModelsRefresher(atomicCfg *config.AtomicConfig) func() {
+func startGoModelsRefresher(atomicCfg *config.AtomicConfig, setSnapshot func(*gomodels.Snapshot)) func() {
 	snapshotPath := gomodels.SnapshotPath(filepath.Dir(atomicCfg.Path()))
 
 	// Stopping cancels a sync in progress: with native checks on, a first
@@ -939,9 +951,7 @@ func startGoModelsRefresher(atomicCfg *config.AtomicConfig) func() {
 
 	sync := func() {
 		cfg := atomicCfg.Get()
-		previous, _ := gomodels.LoadSnapshot(snapshotPath)
-
-		snap, err := gomodels.SyncAndWrite(ctx, goModelsDeps(cfg), snapshotPath)
+		result, err := gomodels.SyncAndWrite(ctx, goModelsDeps(cfg), snapshotPath)
 		if ctx.Err() != nil {
 			return
 		}
@@ -949,20 +959,16 @@ func startGoModelsRefresher(atomicCfg *config.AtomicConfig) func() {
 			slog.Warn("go-models sync failed, keeping previous snapshot", "error", err)
 			return
 		}
-		if err := atomicCfg.Reload(); err != nil {
-			slog.Warn("go-models sync: config reload failed", "error", err)
-			return
-		}
+		setSnapshot(result.Snapshot)
 
-		added, removed := gomodels.Delta(previous, snap)
 		nativeChecked := 0
-		for _, m := range snap.Models {
-			if m.NativeCheckedAt != nil && m.NativeCheckedAt.Equal(snap.FetchedAt) {
+		for _, m := range result.Snapshot.Models {
+			if m.NativeCheckedAt != nil && m.NativeCheckedAt.Equal(result.Snapshot.FetchedAt) {
 				nativeChecked++
 			}
 		}
 		slog.Info("go-models synced",
-			"models", len(snap.Models), "added", len(added), "removed", len(removed),
+			"models", len(result.Snapshot.Models), "added", len(result.Added), "removed", len(result.Removed),
 			"native_checked", nativeChecked)
 	}
 
@@ -972,9 +978,6 @@ func startGoModelsRefresher(atomicCfg *config.AtomicConfig) func() {
 		sync()
 		for {
 			hours := atomicCfg.Get().GoModels.RefreshHours
-			if hours <= 0 {
-				hours = 6
-			}
 			timer := time.NewTimer(time.Duration(hours) * time.Hour)
 			select {
 			case <-ctx.Done():
@@ -1024,24 +1027,21 @@ func goModelsSyncCmd() *cobra.Command {
 			}
 
 			snapshotPath := gomodels.SnapshotPath(filepath.Dir(config.ResolveConfigPath()))
-			previous, _ := gomodels.LoadSnapshot(snapshotPath)
-
-			snap, err := gomodels.SyncAndWrite(cmd.Context(), goModelsDeps(cfg), snapshotPath)
+			result, err := gomodels.SyncAndWrite(cmd.Context(), goModelsDeps(cfg), snapshotPath)
 			if err != nil {
 				return fmt.Errorf("go-models sync failed: %w", err)
 			}
 
-			added, removed := gomodels.Delta(previous, snap)
-			cmd.Printf("Synced %d OpenCode Go model(s) to %s\n\n", len(snap.Models), snapshotPath)
+			cmd.Printf("Synced %d OpenCode Go model(s) to %s\n\n", len(result.Snapshot.Models), snapshotPath)
 			cmd.Printf("%-24s %-28s %-10s %-10s %-8s %s\n", "ID", "NAME", "WIRE", "CONTEXT", "IN_DOCS", "NATIVE")
-			for _, m := range snap.Models {
+			for _, m := range result.Snapshot.Models {
 				cmd.Printf("%-24s %-28s %-10s %-10d %-8t %s\n", m.ID, m.Name, m.WireFormat, m.ContextWindow, m.InDocs, m.NativeMessages)
 			}
-			if len(added) > 0 {
-				cmd.Printf("\nAdded:   %s\n", strings.Join(added, ", "))
+			if len(result.Added) > 0 {
+				cmd.Printf("\nAdded:   %s\n", strings.Join(result.Added, ", "))
 			}
-			if len(removed) > 0 {
-				cmd.Printf("Removed: %s\n", strings.Join(removed, ", "))
+			if len(result.Removed) > 0 {
+				cmd.Printf("Removed: %s\n", strings.Join(result.Removed, ", "))
 			}
 			return nil
 		},

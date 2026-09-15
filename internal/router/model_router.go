@@ -34,8 +34,8 @@ type ModelRouter struct {
 	refreshWG    sync.WaitGroup
 
 	// goModelsSnapshot is the live OpenCode Go model list synced by
-	// internal/gomodels, used as a routing fallback in resolveRequestedModel
-	// for a model that is in neither cfg.Models nor the models.dev catalog.
+	// internal/gomodels, used by resolveRequestedModel for a model that is
+	// not in cfg.Models, before the models.dev catalog is consulted.
 	// Set via SetGoModelsSnapshot; nil means no snapshot has been loaded yet.
 	goModelsSnapshot atomic.Pointer[gomodels.Snapshot]
 }
@@ -212,8 +212,8 @@ func describeRouting(trigger string, primary config.ModelConfig) string {
 }
 
 // SetGoModelsSnapshot atomically swaps the live OpenCode Go model list used
-// as a routing fallback (see resolveRequestedModel) for a model that is in
-// neither cfg.Models nor the models.dev catalog. Safe to call from a
+// by resolveRequestedModel for a model that is not in cfg.Models, before the
+// models.dev catalog is consulted. Safe to call from a
 // background refresher goroutine concurrently with requests. A nil snapshot
 // disables the fallback (nothing synced yet, or go_models is disabled).
 func (r *ModelRouter) SetGoModelsSnapshot(snap *gomodels.Snapshot) {
@@ -221,15 +221,18 @@ func (r *ModelRouter) SetGoModelsSnapshot(snap *gomodels.Snapshot) {
 }
 
 // resolveFromGoModelsSnapshot looks up requestedModel by exact id in the
-// live OpenCode Go model list (see SetGoModelsSnapshot). A match's
-// wire_format is the snapshot's docs (or default) value, except that a
-// native_messages "yes" verdict means the model actually accepts the
-// Anthropic Messages endpoint, so that's what it's routed to. Temperature
+// live OpenCode Go model list (see SetGoModelsSnapshot) — exact, like the
+// cfg.Models lookup before it, so hand config always wins. A match's
+// wire_format is the snapshot's docs (or default) value, except that an
+// "openai" model with a native_messages "yes" verdict actually accepts the
+// Anthropic Messages endpoint, so that's what it's routed to. The verdict
+// is carried across syncs while wire_format is re-read from the docs, so it
+// never overrides a docs-listed anthropic or responses format. Temperature
 // and MaxTokens are inherited from cfg.Models["default"], matching
 // legacyUnknownModelConfig below.
 func (r *ModelRouter) resolveFromGoModelsSnapshot(cfg *config.Config, requestedModel string) (config.ModelConfig, bool) {
 	snap := r.goModelsSnapshot.Load()
-	if snap == nil {
+	if snap == nil || !cfg.GoModelsEnabled() {
 		return config.ModelConfig{}, false
 	}
 	for _, m := range snap.Models {
@@ -237,14 +240,15 @@ func (r *ModelRouter) resolveFromGoModelsSnapshot(cfg *config.Config, requestedM
 			continue
 		}
 		wireFormat := string(m.WireFormat)
-		if m.NativeMessages == gomodels.NativeSupportYes {
-			wireFormat = "anthropic"
+		if m.WireFormat == gomodels.WireFormatOpenAI && m.NativeMessages == gomodels.NativeSupportYes {
+			wireFormat = string(gomodels.WireFormatAnthropic)
 		}
 		primary := config.ModelConfig{
 			Provider:      config.ProviderOpenCodeGo,
 			ModelID:       m.ID,
 			WireFormat:    wireFormat,
 			ContextWindow: m.ContextWindow,
+			Vision:        m.Vision,
 		}
 		if def, ok := cfg.Models["default"]; ok {
 			primary.Temperature = def.Temperature

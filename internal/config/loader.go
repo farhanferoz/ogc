@@ -26,6 +26,7 @@ const (
 	defaultCatalogSourceURL = "https://models.dev/catalog.json"
 
 	defaultGoModelsRefreshHours = 6
+	maxGoModelsRefreshHours     = 24 * 365
 	defaultGoModelsDocsURL      = "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/go.mdx"
 	defaultGoModelsModelsURL    = "https://opencode.ai/zen/go/v1/models"
 	defaultGoModelsMetadataURL  = "https://models.dev/api.json"
@@ -316,8 +317,13 @@ func applyDefaults(cfg *Config) {
 	if cfg.Catalog.SourceURL == "" {
 		cfg.Catalog.SourceURL = defaultCatalogSourceURL
 	}
-	if cfg.GoModels.RefreshHours == 0 {
+	if cfg.GoModels.RefreshHours <= 0 {
 		cfg.GoModels.RefreshHours = defaultGoModelsRefreshHours
+	}
+	// Cap far below the time.Duration overflow (about 2.56 million hours),
+	// which would turn the refresher's timer negative and make it spin.
+	if cfg.GoModels.RefreshHours > maxGoModelsRefreshHours {
+		cfg.GoModels.RefreshHours = maxGoModelsRefreshHours
 	}
 	if cfg.GoModels.DocsURL == "" {
 		cfg.GoModels.DocsURL = defaultGoModelsDocsURL

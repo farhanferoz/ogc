@@ -216,9 +216,9 @@ func (s *Server) Storage() *storage.Database {
 	return s.storage
 }
 
-// SetGoModelsSnapshot swaps the live OpenCode Go model list the router falls
-// back to for a model that is in neither cfg.Models nor the models.dev
-// catalog. The caller (a background refresher, or a one-time load of the
+// SetGoModelsSnapshot swaps the live OpenCode Go model list the router uses
+// for a model that is not in cfg.Models, before the models.dev catalog is
+// consulted. The caller (a background refresher, or a one-time load of the
 // on-disk snapshot at startup) never needs to reach into the model router
 // itself.
 func (s *Server) SetGoModelsSnapshot(snap *gomodels.Snapshot) {

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // docsRow renders one Endpoints table row in the shape ParseDocsTable
@@ -381,5 +382,91 @@ func TestDelta_NilPreviousMeansEverythingIsAdded(t *testing.T) {
 	}
 	if len(removed) != 0 {
 		t.Errorf("removed = %v, want none", removed)
+	}
+}
+
+// A sync cancelled during the native check (the refresher stopping at
+// shutdown) must fail, not return a snapshot whose unprobed models carry a
+// fresh "unknown" verdict — SyncAndWrite would write it and the models would
+// not be re-probed for nativeCheckMaxAge.
+func TestSync_CancelledDuringNativeCheckFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	live := staticServer(t, liveModelsJSON("model-a", "model-b"))
+	docs := staticServer(t, buildDocsMarkdown(docsRow("Other", "other", "chat/completions")))
+	meta := staticServer(t, metadataJSON(t, map[string]modelMetadata{}))
+	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cancel()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	t.Cleanup(probe.Close)
+
+	deps := Deps{
+		HTTPClient: live.Client(), LiveURL: live.URL, DocsURL: docs.URL, MetadataURL: meta.URL,
+		CheckNative: true, AnthropicURL: probe.URL, ChatURL: probe.URL, APIKey: "k",
+	}
+	snap, err := Sync(ctx, deps, nil)
+	if err == nil {
+		t.Fatalf("Sync after cancellation returned no error; snapshot = %+v", snap.Models)
+	}
+}
+
+// A live list whose entries all lack an id must fail like an empty list,
+// not produce an empty snapshot that SyncAndWrite writes over a good one.
+func TestSync_LiveEntriesWithoutIDsFail(t *testing.T) {
+	live := staticServer(t, `{"data":[{},{"object":"model"}]}`)
+	docs := staticServer(t, buildDocsMarkdown(docsRow("Other", "other", "chat/completions")))
+	meta := staticServer(t, metadataJSON(t, map[string]modelMetadata{}))
+
+	deps := Deps{HTTPClient: live.Client(), LiveURL: live.URL, DocsURL: docs.URL, MetadataURL: meta.URL}
+	snap, err := Sync(context.Background(), deps, nil)
+	if err == nil {
+		t.Fatalf("Sync returned no error for id-less live entries; snapshot = %+v", snap.Models)
+	}
+}
+
+// Vision comes from models.dev's modalities.input, the same signal the
+// catalog uses (catalog.Model.SupportsVision).
+func TestSync_VisionFromMetadataModalities(t *testing.T) {
+	live := staticServer(t, liveModelsJSON("seeing-model", "text-model", "unlisted-model"))
+	docs := staticServer(t, buildDocsMarkdown(docsRow("Other", "other", "chat/completions")))
+	meta := staticServer(t, `{"opencode-go":{"models":{`+
+		`"seeing-model":{"name":"Seeing","modalities":{"input":["text","image"]}},`+
+		`"text-model":{"name":"Text","modalities":{"input":["text"]}}}}}`)
+
+	deps := Deps{HTTPClient: live.Client(), LiveURL: live.URL, DocsURL: docs.URL, MetadataURL: meta.URL}
+	snap, err := Sync(context.Background(), deps, nil)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	for id, want := range map[string]bool{"seeing-model": true, "text-model": false, "unlisted-model": false} {
+		if got := modelByID(t, snap, id).Vision; got != want {
+			t.Errorf("%s vision = %v, want %v", id, got, want)
+		}
+	}
+}
+
+// Ids and names reach a terminal (go-models sync output, the shell picker):
+// an id with control characters is dropped, a name with them falls back to
+// the id.
+func TestSync_ControlCharactersDropped(t *testing.T) {
+	live := staticServer(t, liveModelsJSON("good-model", "bad\x1b[31m-model"))
+	docs := staticServer(t, buildDocsMarkdown(docsRow("Good\x1b]0;title\x07", "good-model", "chat/completions")))
+	meta := staticServer(t, metadataJSON(t, map[string]modelMetadata{}))
+
+	deps := Deps{HTTPClient: live.Client(), LiveURL: live.URL, DocsURL: docs.URL, MetadataURL: meta.URL}
+	snap, err := Sync(context.Background(), deps, nil)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if len(snap.Models) != 1 || snap.Models[0].ID != "good-model" {
+		t.Fatalf("models = %+v, want only good-model", snap.Models)
+	}
+	if name := snap.Models[0].Name; name != "good-model" {
+		t.Errorf("name = %q, want the id in place of a name with control characters", name)
 	}
 }

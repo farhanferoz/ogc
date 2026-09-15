@@ -181,22 +181,8 @@ func serveCmd() *cobra.Command {
 				return fmt.Errorf("failed to create server: %w", err)
 			}
 
-			// Keep the OpenCode Go model list snapshot fresh in the
-			// background, so new models become usable and retired ones
-			// disappear without a restart or a config edit. Load whatever
-			// was last synced before the server starts listening, so the
-			// fallback is warm from the first request rather than only
-			// after the first background sync completes.
-			if cfg.GoModels.Enabled == nil || *cfg.GoModels.Enabled {
-				snapshotPath := gomodels.SnapshotPath(filepath.Dir(atomicCfg.Path()))
-				if snap, err := gomodels.LoadSnapshot(snapshotPath); err != nil {
-					slog.Warn("go-models: ignoring corrupt snapshot at startup", "path", snapshotPath, "error", err)
-				} else if snap != nil {
-					srv.SetGoModelsSnapshot(snap)
-				}
-				stopGoModels := startGoModelsRefresher(atomicCfg, srv.SetGoModelsSnapshot)
-				defer stopGoModels()
-			}
+			stopGoModels := startGoModels(atomicCfg, srv.SetGoModelsSnapshot)
+			defer stopGoModels()
 
 			// Start config watcher for hot reload (only if enabled in config).
 			if cfg.HotReload {
@@ -351,6 +337,8 @@ Press Ctrl+C to stop the server.`,
 			if err != nil {
 				return fmt.Errorf("failed to create server: %w", err)
 			}
+			stopGoModels := startGoModels(atomicCfg, srv.SetGoModelsSnapshot)
+			defer stopGoModels()
 
 			// Start config watcher for hot reload.
 			if cfg.HotReload {
@@ -951,6 +939,13 @@ func startGoModelsRefresher(atomicCfg *config.AtomicConfig, setSnapshot func(*go
 
 	sync := func() {
 		cfg := atomicCfg.Get()
+		// go_models may have been turned off by a hot reload since serve
+		// started this loop: stop syncing. The router already ignores the
+		// snapshot while disabled, and keeping it lets a later re-enable
+		// route from it at once.
+		if !cfg.GoModelsEnabled() {
+			return
+		}
 		result, err := gomodels.SyncAndWrite(ctx, goModelsDeps(cfg), snapshotPath)
 		if ctx.Err() != nil {
 			return
@@ -995,6 +990,26 @@ func startGoModelsRefresher(atomicCfg *config.AtomicConfig, setSnapshot func(*go
 	}
 }
 
+// startGoModels keeps the OpenCode Go model list snapshot fresh for a server
+// ("serve" and "start" alike) when go_models is enabled, so new models become
+// usable and retired ones disappear without a restart or a config edit. It
+// loads whatever was last synced before the server starts listening, so the
+// fallback is warm from the first request rather than only after the first
+// background sync, then starts the refresher. The returned func stops it; it
+// is a no-op when go_models is disabled.
+func startGoModels(atomicCfg *config.AtomicConfig, setSnapshot func(*gomodels.Snapshot)) func() {
+	if !atomicCfg.Get().GoModelsEnabled() {
+		return func() {}
+	}
+	snapshotPath := gomodels.SnapshotPath(filepath.Dir(atomicCfg.Path()))
+	if snap, err := gomodels.LoadSnapshot(snapshotPath); err != nil {
+		slog.Warn("go-models: ignoring corrupt snapshot at startup", "path", snapshotPath, "error", err)
+	} else if snap != nil {
+		setSnapshot(snap)
+	}
+	return startGoModelsRefresher(atomicCfg, setSnapshot)
+}
+
 // goModelsCmd returns the "go-models" command group for managing the
 // OpenCode Go model list snapshot from the CLI.
 func goModelsCmd() *cobra.Command {
@@ -1002,8 +1017,8 @@ func goModelsCmd() *cobra.Command {
 		Use:   "go-models",
 		Short: "Manage the OpenCode Go model list snapshot",
 		Long: `Fetch OpenCode Go's live model list and write a snapshot the proxy
-merges into its config automatically, so new models become usable and
-retired ones disappear without a config edit. See "go_models" in the config
+routes from for any model not named in the config, so new models become
+usable and retired ones disappear without a config edit. See "go_models" in the config
 for refresh interval and source URL overrides.`,
 	}
 	cmd.AddCommand(goModelsSyncCmd())

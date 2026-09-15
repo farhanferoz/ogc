@@ -2,10 +2,15 @@ package gomodels
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // nativeCheckMaxAge is how long an "unknown" native-support verdict is
@@ -72,6 +77,13 @@ func Sync(ctx context.Context, deps Deps, previous *Snapshot) (*Snapshot, error)
 	now := time.Now().UTC()
 	models := make([]Model, 0, len(liveIDs))
 	for _, id := range liveIDs {
+		// Ids and names come from remote sources and are printed to a
+		// terminal (go-models sync, the shell model picker), so control
+		// characters such as ESC must not reach the snapshot.
+		if strings.ContainsFunc(id, unicode.IsControl) {
+			slog.Warn("go-models: skipping live model id with control characters", "id", strconv.Quote(id))
+			continue
+		}
 		model := Model{ID: id, NativeMessages: NativeSupportNotChecked}
 		if prev, ok := previousByID[id]; ok {
 			model.NativeMessages = prev.NativeMessages
@@ -91,8 +103,9 @@ func Sync(ctx context.Context, deps Deps, previous *Snapshot) (*Snapshot, error)
 				model.Name = meta.Name
 			}
 			model.ContextWindow = meta.Limit.Context
+			model.Vision = slices.Contains(meta.Modalities.Input, "image")
 		}
-		if model.Name == "" {
+		if model.Name == "" || strings.ContainsFunc(model.Name, unicode.IsControl) {
 			model.Name = id
 		}
 
@@ -102,15 +115,22 @@ func Sync(ctx context.Context, deps Deps, previous *Snapshot) (*Snapshot, error)
 		//
 		// WireFormat here always stays the docs (or default) truth — it is
 		// never overwritten with the check's verdict. NativeMessages alone
-		// carries that verdict; a "yes" reading is instead consumed by the
-		// config loader's merge, which derives the effective "anthropic"
-		// routing from it (see internal/config/loader.go).
+		// carries that verdict; the router derives "anthropic" routing from a
+		// "yes" (resolveFromGoModelsSnapshot in internal/router).
 		if model.WireFormat == WireFormatOpenAI && deps.CheckNative && needsNativeCheck(model, now) {
 			model.NativeMessages = checkNativeMessages(ctx, deps.HTTPClient, deps.AnthropicURL, deps.ChatURL, deps.APIKey, id)
 			model.NativeCheckedAt = &now
 		}
 
 		models = append(models, model)
+	}
+	// A cancelled context makes every remaining probe fail, which reads as
+	// "unknown" and would hold off a real probe for nativeCheckMaxAge.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(models) == 0 {
+		return nil, fmt.Errorf("live models response has no usable model ids")
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
 
@@ -153,7 +173,7 @@ type SyncResult struct {
 func SyncAndWrite(ctx context.Context, deps Deps, snapshotPath string) (*SyncResult, error) {
 	previous, err := LoadSnapshot(snapshotPath)
 	if err != nil {
-		slog.Warn("gomodels: ignoring corrupt previous snapshot", "path", snapshotPath, "error", err)
+		slog.Warn("go-models: ignoring corrupt previous snapshot", "path", snapshotPath, "error", err)
 		previous = nil
 	}
 

@@ -118,3 +118,28 @@ func TestNeedsNativeCheck_UnknownRetriesAfter24Hours(t *testing.T) {
 		t.Error("an unknown verdict with no timestamp should be reprobed")
 	}
 }
+
+// An unanswered, rate-limited or timed-out /messages probe must not become a
+// permanent "no" just because /chat/completions answered: "no" is never
+// re-probed.
+func TestCheckNativeMessages_UnansweredMessagesIsUnknown(t *testing.T) {
+	chat, _ := fixedStatusServer(t, http.StatusOK)
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusRequestTimeout} {
+		anthropic, _ := fixedStatusServer(t, status)
+		if got := checkNativeMessages(context.Background(), anthropic.Client(), anthropic.URL, chat.URL, "key", "m"); got != NativeSupportUnknown {
+			t.Errorf("/messages %d, chat 200: got %q, want %q", status, got, NativeSupportUnknown)
+		}
+	}
+
+	hanging := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	t.Cleanup(hanging.Close)
+	hc := &http.Client{Timeout: 100 * time.Millisecond}
+	if got := checkNativeMessages(context.Background(), hc, hanging.URL, chat.URL, "key", "m"); got != NativeSupportUnknown {
+		t.Errorf("/messages client timeout, chat 200: got %q, want %q", got, NativeSupportUnknown)
+	}
+}

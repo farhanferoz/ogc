@@ -40,6 +40,9 @@ func fetchLiveModels(ctx context.Context, hc *http.Client, url string) ([]string
 			ids = append(ids, m.ID)
 		}
 	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("live models response has no model ids")
+	}
 	return ids, nil
 }
 
@@ -64,6 +67,9 @@ type modelMetadata struct {
 		Context int `json:"context"`
 		Output  int `json:"output"`
 	} `json:"limit"`
+	Modalities struct {
+		Input []string `json:"input"`
+	} `json:"modalities"`
 }
 
 // modelsDevProvider is the "opencode-go" key models.dev groups its models

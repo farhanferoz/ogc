@@ -54,10 +54,16 @@ func checkNativeMessages(ctx context.Context, hc *http.Client, anthropicURL, cha
 		return NativeSupportUnknown
 	}
 
-	if probe(ctx, hc, anthropicURL, apiKey, body, true) {
+	status := probe(ctx, hc, anthropicURL, apiKey, body, true)
+	if status/100 == 2 {
 		return NativeSupportYes
 	}
-	if probe(ctx, hc, chatURL, apiKey, body, false) {
+	// No answer, a rate limit or a timeout on /messages says nothing about
+	// support, and "no" is never re-probed, so leave it "unknown" to retry.
+	if status == 0 || status == http.StatusTooManyRequests || status == http.StatusRequestTimeout {
+		return NativeSupportUnknown
+	}
+	if probe(ctx, hc, chatURL, apiKey, body, false)/100 == 2 {
 		return NativeSupportNo
 	}
 	return NativeSupportUnknown
@@ -65,12 +71,12 @@ func checkNativeMessages(ctx context.Context, hc *http.Client, anthropicURL, cha
 
 // probe sends body to url with the auth headers appropriate for the
 // Anthropic Messages endpoint (anthropic=true) or the OpenAI Chat
-// Completions endpoint (anthropic=false), and reports whether the response
-// was 2xx.
-func probe(ctx context.Context, hc *http.Client, url, apiKey string, body []byte, anthropic bool) bool {
+// Completions endpoint (anthropic=false), and returns the response status
+// code, or 0 if no response arrived.
+func probe(ctx context.Context, hc *http.Client, url, apiKey string, body []byte, anthropic bool) int {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return false
+		return 0
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(core.OpenCodeSessionHeader, nativeCheckSessionID)
@@ -83,10 +89,10 @@ func probe(ctx context.Context, hc *http.Client, url, apiKey string, body []byte
 
 	resp, err := hc.Do(req)
 	if err != nil {
-		return false
+		return 0
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxSourceBytes))
 
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	return resp.StatusCode
 }

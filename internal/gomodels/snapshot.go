@@ -12,8 +12,8 @@ import (
 const SnapshotFileName = "go-models.json"
 
 // WireFormat is the wire format a Go model speaks, stored as a string so the
-// snapshot on disk is self-describing and internal/config can read it
-// without importing this package (see internal/config/loader.go).
+// snapshot on disk is self-describing; the values match what
+// config.ModelConfig.WireFormat accepts (core.ParseWireFormat).
 type WireFormat string
 
 const (
@@ -41,6 +41,7 @@ type Model struct {
 	WireFormat      WireFormat    `json:"wire_format"`
 	InDocs          bool          `json:"in_docs"`
 	ContextWindow   int           `json:"context_window"`
+	Vision          bool          `json:"vision"`
 	NativeMessages  NativeSupport `json:"native_messages"`
 	NativeCheckedAt *time.Time    `json:"native_checked_at,omitempty"`
 }
@@ -92,13 +93,27 @@ func WriteSnapshot(path string, snap *Snapshot) error {
 	}
 	data = append(data, '\n')
 
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		_ = os.Remove(tmpPath)
+	// A unique temp name keeps a CLI "go-models sync" and the serve
+	// refresher from writing through the same temp file at once.
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return fmt.Errorf("create snapshot temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	// Removing a path that was already renamed into place is a no-op error.
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
 		return fmt.Errorf("write snapshot temp file: %w", err)
 	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("write snapshot temp file: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0644); err != nil {
+		return fmt.Errorf("chmod snapshot temp file: %w", err)
+	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename snapshot file: %w", err)
 	}
 	return nil

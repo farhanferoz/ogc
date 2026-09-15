@@ -376,6 +376,15 @@
     "source_url": "https://models.dev/catalog.json"
   },
 
+  "go_models": {
+    "enabled": true,
+    "refresh_hours": 6,
+    "check_native": false,
+    "docs_url": "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/go.mdx",
+    "models_url": "https://opencode.ai/zen/go/v1/models",
+    "metadata_url": "https://models.dev/api.json"
+  },
+
   "storage": {
     "database_path": "~/.local/share/routatic-proxy/data.db",
     "retention_days": 7,

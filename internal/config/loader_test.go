@@ -1267,3 +1267,26 @@ func TestDefaults_StreamingTimeoutFallback(t *testing.T) {
 		t.Errorf("OpenCodeZen.StreamTimeoutMs = %d, want 700000 (should fallback to StreamingTimeoutMs)", cfg.OpenCodeZen.StreamTimeoutMs)
 	}
 }
+
+// A zero or negative refresh interval would make the refresher's timer fire
+// immediately, and a huge one overflows time.Duration to the same effect.
+func TestApplyDefaults_GoModels(t *testing.T) {
+	for hours, wantHours := range map[int]int{
+		0:         defaultGoModelsRefreshHours,
+		-1:        defaultGoModelsRefreshHours,
+		12:        12,
+		3_000_000: maxGoModelsRefreshHours,
+	} {
+		cfg := &Config{GoModels: GoModelsConfig{RefreshHours: hours}}
+		applyDefaults(cfg)
+		want := GoModelsConfig{
+			RefreshHours: wantHours,
+			DocsURL:      defaultGoModelsDocsURL,
+			ModelsURL:    defaultGoModelsModelsURL,
+			MetadataURL:  defaultGoModelsMetadataURL,
+		}
+		if cfg.GoModels != want {
+			t.Errorf("refresh_hours %d: GoModels = %+v, want %+v", hours, cfg.GoModels, want)
+		}
+	}
+}

@@ -155,3 +155,61 @@ func TestSetGoModelsSnapshot_UpdatesRoutingImmediately(t *testing.T) {
 		t.Fatalf("expected the second snapshot swap to take effect immediately, got %+v ok=%v", result.Primary, ok)
 	}
 }
+
+// A "yes" verdict is carried forward across syncs while wire_format is
+// re-read from the docs, so a model probed while absent from the docs can
+// later be listed as a Responses model with a stale "yes". The docs format
+// must win: only a plain OpenAI chat model is upgraded to Anthropic routing.
+func TestResolveRequestedModel_GoModelsSnapshotNativeYesIgnoredForResponses(t *testing.T) {
+	cfg := &config.Config{RespectRequestedModel: boolPtr(true)}
+	r := NewModelRouter(newTestAtomicConfig(cfg))
+	r.SetGoModelsSnapshot(&gomodels.Snapshot{Models: []gomodels.Model{
+		{ID: "grok-4.6", WireFormat: gomodels.WireFormatResponses, NativeMessages: gomodels.NativeSupportYes},
+	}})
+
+	result, ok, _ := r.resolveRequestedModel(cfg, "grok-4.6", false)
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if result.Primary.WireFormat != "responses" {
+		t.Errorf("WireFormat = %q, want %q (docs format beats a stale native verdict)", result.Primary.WireFormat, "responses")
+	}
+}
+
+// go_models.enabled=false (e.g. after a hot reload) must stop the fallback at
+// once, without waiting for the refresher's next tick.
+func TestResolveRequestedModel_GoModelsSnapshotIgnoredWhenDisabled(t *testing.T) {
+	cfg := &config.Config{RespectRequestedModel: boolPtr(true)}
+	cfg.GoModels.Enabled = boolPtr(false)
+	r := NewModelRouter(newTestAtomicConfig(cfg))
+	r.SetGoModelsSnapshot(&gomodels.Snapshot{Models: []gomodels.Model{
+		{ID: "snapshot-only", WireFormat: gomodels.WireFormatAnthropic},
+	}})
+
+	result, ok, err := r.resolveRequestedModel(cfg, "snapshot-only", false)
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v, want the legacy unknown-model route", ok, err)
+	}
+	if result.Primary.WireFormat == string(gomodels.WireFormatAnthropic) {
+		t.Errorf("primary = %+v, want the snapshot ignored while go_models is disabled", result.Primary)
+	}
+}
+
+// A snapshot-only model that accepts images must not be rejected for an
+// image turn: resolveRequestedModel refuses needsVision when Vision is false,
+// and the static registry does not know newly synced models.
+func TestResolveRequestedModel_GoModelsSnapshotVision(t *testing.T) {
+	cfg := &config.Config{RespectRequestedModel: boolPtr(true)}
+	r := NewModelRouter(newTestAtomicConfig(cfg))
+	r.SetGoModelsSnapshot(&gomodels.Snapshot{Models: []gomodels.Model{
+		{ID: "new-vision-model", WireFormat: gomodels.WireFormatOpenAI, Vision: true},
+		{ID: "new-text-model", WireFormat: gomodels.WireFormatOpenAI},
+	}})
+
+	if _, ok, err := r.resolveRequestedModel(cfg, "new-vision-model", true); err != nil || !ok {
+		t.Errorf("vision model with image turn: ok=%v err=%v, want ok=true err=nil", ok, err)
+	}
+	if _, _, err := r.resolveRequestedModel(cfg, "new-text-model", true); err == nil {
+		t.Error("text-only model with image turn: want a vision error")
+	}
+}

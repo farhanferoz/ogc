@@ -50,6 +50,12 @@ type CostRoutingConfig struct {
 	PenaltyPerProvider map[string]float64 `json:"penalty_per_provider,omitempty"`
 }
 
+// GoModelsEnabled reports whether the OpenCode Go model list sync and its
+// routing fallback are active; go_models.enabled defaults to true when unset.
+func (c *Config) GoModelsEnabled() bool {
+	return c != nil && (c.GoModels.Enabled == nil || *c.GoModels.Enabled)
+}
+
 // CostBasedRoutingEnabled reports whether cost-aware routing should be active.
 // It is enabled when either the legacy top-level flag is set or the nested
 // cost_routing block explicitly enables it.

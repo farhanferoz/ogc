@@ -20,6 +20,7 @@ import (
 	"github.com/routatic/proxy/internal/config"
 	"github.com/routatic/proxy/internal/daemon"
 	"github.com/routatic/proxy/internal/debug"
+	"github.com/routatic/proxy/internal/gomodels"
 	"github.com/routatic/proxy/internal/gui"
 	"github.com/routatic/proxy/internal/server"
 	"github.com/routatic/proxy/internal/storage"
@@ -57,6 +58,7 @@ Legacy ~/.config/oc-go-cc/config.json and OC_GO_CC_* environment variables are s
 	rootCmd.AddCommand(checkCmd())
 	rootCmd.AddCommand(modelsCmd())
 	rootCmd.AddCommand(catalogCmd())
+	rootCmd.AddCommand(goModelsCmd())
 	rootCmd.AddCommand(autostartCmd())
 	rootCmd.AddCommand(updateCmd)
 	rootCmd.AddCommand(startCmd())
@@ -171,6 +173,14 @@ func serveCmd() *cobra.Command {
 				atomicCfg.OnReload(func(newCfg *config.Config) {
 					newCfg.Port = port
 				})
+			}
+
+			// Keep the OpenCode Go model list snapshot fresh in the
+			// background, so new models become usable and retired ones
+			// disappear without a restart or a config edit.
+			if cfg.GoModels.Enabled == nil || *cfg.GoModels.Enabled {
+				stopGoModels := startGoModelsRefresher(atomicCfg)
+				defer stopGoModels()
 			}
 
 			// Create and start server.
@@ -886,6 +896,151 @@ func autostartCmd() *cobra.Command {
 	cmd.PersistentFlags().StringP("config", "c", "", "Path to config file")
 	cmd.PersistentFlags().IntP("port", "p", 0, "Override listen port")
 
+	return cmd
+}
+
+// goModelsDeps builds the internal/gomodels.Deps for cfg: the three source
+// URLs and the OpenCode Go upstream credentials the optional native
+// wire-format check probes.
+func goModelsDeps(cfg *config.Config) gomodels.Deps {
+	return gomodels.Deps{
+		HTTPClient:   &http.Client{Timeout: 30 * time.Second},
+		LiveURL:      cfg.GoModels.ModelsURL,
+		DocsURL:      cfg.GoModels.DocsURL,
+		MetadataURL:  cfg.GoModels.MetadataURL,
+		CheckNative:  cfg.GoModels.CheckNative,
+		AnthropicURL: cfg.OpenCodeGo.AnthropicBaseURL,
+		ChatURL:      cfg.OpenCodeGo.BaseURL,
+		APIKey:       firstAPIKey(cfg.OpenCodeGo.EffectiveAPIKeys()),
+	}
+}
+
+// firstAPIKey returns the first of a key pool, or "" if empty. The native
+// check is a single diagnostic request, so key rotation doesn't apply.
+func firstAPIKey(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	return keys[0]
+}
+
+// startGoModelsRefresher keeps the OpenCode Go model list snapshot fresh in
+// the background: syncs once immediately, then every go_models.refresh_hours,
+// atomically rewriting internal/gomodels' snapshot file beside the config
+// and reloading atomicCfg so newly live models route immediately and
+// retired ones stop being offered — no restart, no config edit required.
+// The returned func stops the loop and waits for it to exit.
+func startGoModelsRefresher(atomicCfg *config.AtomicConfig) func() {
+	snapshotPath := gomodels.SnapshotPath(filepath.Dir(atomicCfg.Path()))
+
+	sync := func() {
+		cfg := atomicCfg.Get()
+		previous, _ := gomodels.LoadSnapshot(snapshotPath)
+
+		snap, err := gomodels.SyncAndWrite(context.Background(), goModelsDeps(cfg), snapshotPath)
+		if err != nil {
+			slog.Warn("go-models sync failed, keeping previous snapshot", "error", err)
+			return
+		}
+		if err := atomicCfg.Reload(); err != nil {
+			slog.Warn("go-models sync: config reload failed", "error", err)
+			return
+		}
+
+		added, removed := gomodels.Delta(previous, snap)
+		nativeChecked := 0
+		for _, m := range snap.Models {
+			if m.NativeCheckedAt != nil && m.NativeCheckedAt.Equal(snap.FetchedAt) {
+				nativeChecked++
+			}
+		}
+		slog.Info("go-models synced",
+			"models", len(snap.Models), "added", len(added), "removed", len(removed),
+			"native_checked", nativeChecked)
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sync()
+		for {
+			hours := atomicCfg.Get().GoModels.RefreshHours
+			if hours <= 0 {
+				hours = 6
+			}
+			timer := time.NewTimer(time.Duration(hours) * time.Hour)
+			select {
+			case <-stop:
+				timer.Stop()
+				return
+			case <-timer.C:
+				sync()
+			}
+		}
+	}()
+
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+// goModelsCmd returns the "go-models" command group for managing the
+// OpenCode Go model list snapshot from the CLI.
+func goModelsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "go-models",
+		Short: "Manage the OpenCode Go model list snapshot",
+		Long: `Fetch OpenCode Go's live model list and write a snapshot the proxy
+merges into its config automatically, so new models become usable and
+retired ones disappear without a config edit. See "go_models" in the config
+for refresh interval and source URL overrides.`,
+	}
+	cmd.AddCommand(goModelsSyncCmd())
+	return cmd
+}
+
+// goModelsSyncCmd returns the "go-models sync" command.
+func goModelsSyncCmd() *cobra.Command {
+	var configPath string
+
+	cmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Fetch the live OpenCode Go model list and write the snapshot",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if configPath != "" {
+				_ = os.Setenv("ROUTATIC_PROXY_CONFIG", configPath)
+			}
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			snapshotPath := gomodels.SnapshotPath(filepath.Dir(config.ResolveConfigPath()))
+			previous, _ := gomodels.LoadSnapshot(snapshotPath)
+
+			snap, err := gomodels.SyncAndWrite(cmd.Context(), goModelsDeps(cfg), snapshotPath)
+			if err != nil {
+				return fmt.Errorf("go-models sync failed: %w", err)
+			}
+
+			added, removed := gomodels.Delta(previous, snap)
+			cmd.Printf("Synced %d OpenCode Go model(s) to %s\n\n", len(snap.Models), snapshotPath)
+			cmd.Printf("%-24s %-28s %-10s %-10s %-8s %s\n", "ID", "NAME", "WIRE", "CONTEXT", "IN_DOCS", "NATIVE")
+			for _, m := range snap.Models {
+				cmd.Printf("%-24s %-28s %-10s %-10d %-8t %s\n", m.ID, m.Name, m.WireFormat, m.ContextWindow, m.InDocs, m.NativeMessages)
+			}
+			if len(added) > 0 {
+				cmd.Printf("\nAdded:   %s\n", strings.Join(added, ", "))
+			}
+			if len(removed) > 0 {
+				cmd.Printf("Removed: %s\n", strings.Join(removed, ", "))
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
 	return cmd
 }
 

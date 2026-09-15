@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -12,13 +13,6 @@ import (
 	"github.com/routatic/proxy/internal/core"
 	"github.com/routatic/proxy/internal/transformer"
 )
-
-// messageStopMarker is the text that identifies a message_stop event, whether
-// it appears in the "event: message_stop" line or the "data:" line. It is
-// searched for across raw upstream byte chunks, so a boundary window equal to
-// its own length minus one is carried from each chunk to the next in case the
-// marker straddles a chunk boundary.
-const messageStopMarker = "message_stop"
 
 // StreamProxy handles SSE stream forwarding from various upstream wire formats
 // to Anthropic-format SSE events. It wraps transformer.StreamHandler and
@@ -69,9 +63,18 @@ func (sp *StreamProxy) proxyOpenAIStream(
 	return sp.handler.ProxyStream(w, body, modelID, clientCtx, idleTimeout, cancel)
 }
 
-// proxyAnthropicPassthroughStream forwards raw Anthropic SSE bytes directly to
-// the client, with an idle watchdog. No transformation is needed since the
-// upstream already speaks Anthropic format.
+// proxyAnthropicPassthroughStream forwards an Anthropic-format SSE stream to
+// the client unchanged, with an idle watchdog. No transformation is needed
+// since the upstream already speaks Anthropic format.
+//
+// Events are relayed whole, through their terminating blank line, and written
+// to w in a single Write call per event (bufio.Reader.ReadBytes has no line
+// length cap, so an event larger than any fixed buffer is still relayed
+// intact). w's own Write is expected to serialize concurrent writers (e.g. a
+// keepalive heartbeat sharing the same http.ResponseWriter), so a whole-event
+// write is the unit that can never be split by an interleaved write from
+// elsewhere — only ever inserted between two events. A stream that ends
+// before a message_stop event is an error, not a clean end.
 func (sp *StreamProxy) proxyAnthropicPassthroughStream(
 	w http.ResponseWriter,
 	body io.ReadCloser,
@@ -82,10 +85,26 @@ func (sp *StreamProxy) proxyAnthropicPassthroughStream(
 	defer func() { _ = body.Close() }()
 	defer cancel()
 
-	buf := make([]byte, 4096)
-	var tail []byte // trailing bytes from the previous chunk, for a marker split across chunks
+	flusher, _ := w.(http.Flusher)
+	reader := bufio.NewReader(body)
+	var event bytes.Buffer
 	sawStop := false
 	ping := transformer.StartIdleWatchdog(clientCtx, cancel, idleTimeout)
+
+	flushEvent := func() error {
+		if event.Len() == 0 {
+			return nil
+		}
+		if _, werr := w.Write(event.Bytes()); werr != nil {
+			return transformer.ErrClientDisconnected
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		event.Reset()
+		return nil
+	}
+
 	for {
 		select {
 		case <-clientCtx.Done():
@@ -95,26 +114,27 @@ func (sp *StreamProxy) proxyAnthropicPassthroughStream(
 			return transformer.ErrClientDisconnected
 		default:
 		}
-		n, rerr := body.Read(buf)
-		if n > 0 {
+
+		line, rerr := reader.ReadBytes('\n')
+		if len(line) > 0 {
 			ping()
-			if !sawStop {
-				window := append(tail, buf[:n]...)
-				if bytes.Contains(window, []byte(messageStopMarker)) {
-					sawStop = true
-					tail = nil
-				} else {
-					keep := min(len(window), len(messageStopMarker)-1)
-					tail = append([]byte(nil), window[len(window)-keep:]...)
-				}
-			}
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return transformer.ErrClientDisconnected
-			}
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
+			event.Write(line)
+			if bytes.HasPrefix(line, []byte("event: message_stop")) ||
+				bytes.HasPrefix(line, []byte(`data: {"type":"message_stop"`)) {
+				sawStop = true
 			}
 		}
+
+		// A blank line is the SSE event boundary. Flush the whole event once
+		// we've reached it, or when the stream ends mid-event so nothing
+		// buffered is lost.
+		atBoundary := len(bytes.TrimSpace(line)) == 0 && event.Len() > len(line)
+		if atBoundary || (rerr != nil && event.Len() > 0) {
+			if err := flushEvent(); err != nil {
+				return err
+			}
+		}
+
 		if rerr == io.EOF {
 			if !sawStop {
 				return fmt.Errorf("upstream stream ended before message_stop")

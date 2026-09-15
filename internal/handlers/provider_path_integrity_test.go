@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -89,7 +90,7 @@ func TestProviderPath_NonStreamingAnthropicPassthrough_KeepsSignature(t *testing
 	}
 }
 
-func runStreamingRequest(t *testing.T, handler *MessagesHandler, modelID string) *httptest.ResponseRecorder {
+func runStreamingRequest(t *testing.T, handler *MessagesHandler, modelID string) *deadlineAwareRecorder {
 	t.Helper()
 	rawBody := json.RawMessage(`{
 		"model": "claude-opus-4-8",
@@ -103,7 +104,9 @@ func runStreamingRequest(t *testing.T, handler *MessagesHandler, modelID string)
 	}
 	chain := []config.ModelConfig{{Provider: "opencode-go", ModelID: modelID}}
 
-	recorder := httptest.NewRecorder()
+	// A real keepalive heartbeat may fire during these tests, so the recorder
+	// must support SetWriteDeadline (see deadlineAwareRecorder's doc comment).
+	recorder := newDeadlineAwareRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	ctx, cancel := context.WithTimeout(req.Context(), 8*time.Second)
 	defer cancel()
@@ -114,7 +117,16 @@ func runStreamingRequest(t *testing.T, handler *MessagesHandler, modelID string)
 
 // --- Behaviour 1: interleaved ping cannot split a native passthrough event ---
 
+// TestProviderPath_AnthropicPassthrough_NoKeepaliveSplit asserts the positive
+// version of the guarantee: the heartbeat is no longer paused during native
+// passthrough, so a multi-second stall must produce at least one keepalive,
+// and that keepalive must land strictly between the two whole events — never
+// inside one, and never altering either event's bytes.
 func TestProviderPath_AnthropicPassthrough_NoKeepaliveSplit(t *testing.T) {
+	const startEvent = "event: message_start\ndata: {\"type\":\"message_start\"}\n\n"
+	const deltaEvent = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"
+	const stopEvent = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
 	blockCh := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -122,18 +134,17 @@ func TestProviderPath_AnthropicPassthrough_NoKeepaliveSplit(t *testing.T) {
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+		_, _ = io.WriteString(w, startEvent)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		// Stall well past the heartbeat interval so a real ping would fire
-		// if the heartbeat were not paused during native passthrough.
+		// Stall well past the 3s default heartbeat interval so a real ping fires.
 		select {
 		case <-blockCh:
-		case <-time.After(6 * time.Second):
+		case <-time.After(10 * time.Second):
 		}
-		_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n")
-		_, _ = fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		_, _ = io.WriteString(w, deltaEvent)
+		_, _ = io.WriteString(w, stopEvent)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -142,15 +153,15 @@ func TestProviderPath_AnthropicPassthrough_NoKeepaliveSplit(t *testing.T) {
 
 	handler := newProviderRegistryTestHandler(t, upstream.URL)
 
-	done := make(chan *httptest.ResponseRecorder)
+	done := make(chan *deadlineAwareRecorder)
 	go func() {
 		done <- runStreamingRequest(t, handler, "minimax-m3")
 	}()
 
-	time.Sleep(1200 * time.Millisecond)
+	time.Sleep(3500 * time.Millisecond)
 	close(blockCh)
 
-	var recorder *httptest.ResponseRecorder
+	var recorder *deadlineAwareRecorder
 	select {
 	case recorder = <-done:
 	case <-time.After(8 * time.Second):
@@ -158,11 +169,24 @@ func TestProviderPath_AnthropicPassthrough_NoKeepaliveSplit(t *testing.T) {
 	}
 
 	body := recorder.Body.String()
-	if !strings.Contains(body, "message_start") || !strings.Contains(body, "content_block_delta") {
-		t.Fatalf("missing expected events in body:\n%s", body)
+	if !strings.Contains(body, startEvent) {
+		t.Fatalf("message_start event bytes not found intact in output:\n%s", body)
 	}
-	if strings.Contains(body, ":keepalive") {
-		t.Errorf("keepalive leaked into native passthrough stream, could split an event:\n%s", body)
+	if !strings.Contains(body, deltaEvent) {
+		t.Fatalf("content_block_delta event bytes not found intact in output:\n%s", body)
+	}
+	if !strings.Contains(body, ":keepalive") {
+		t.Error("expected at least one keepalive during the multi-second stall (heartbeat is no longer paused for native passthrough)")
+	}
+
+	startIdx := strings.Index(body, startEvent)
+	deltaIdx := strings.Index(body, deltaEvent)
+	if startIdx == -1 || deltaIdx == -1 || deltaIdx < startIdx {
+		t.Fatalf("could not locate both events in order:\n%s", body)
+	}
+	between := body[startIdx+len(startEvent) : deltaIdx]
+	if !strings.Contains(between, ":keepalive") {
+		t.Errorf("expected the keepalive(s) to land strictly between message_start and content_block_delta, got:\n%q", between)
 	}
 }
 

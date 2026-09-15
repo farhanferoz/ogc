@@ -66,16 +66,39 @@ func NormalizedToResponses(req *core.NormalizedRequest, model config.ModelConfig
 			role = "user"
 		}
 
-		var text string
+		// Parts accumulate so an image can ride along with its text. A message
+		// without one keeps the plain string content the API also accepts.
+		var parts []types.ResponsesContent
+		hasImage := false
 		flushText := func() {
-			if text == "" {
+			if len(parts) == 0 {
 				return
+			}
+			content := json.RawMessage(nil)
+			if hasImage {
+				encoded, err := json.Marshal(parts)
+				if err != nil {
+					slog.Warn("dropping Responses content parts that would not encode", "role", role, "error", err)
+					parts, hasImage = nil, false
+					return
+				}
+				content = encoded
+			} else {
+				var text string
+				for _, part := range parts {
+					text += part.Text
+				}
+				if text == "" {
+					parts = nil
+					return
+				}
+				content = rawJSONString(text)
 			}
 			responsesReq.Input = append(responsesReq.Input, types.ResponsesInput{
 				Role:    role,
-				Content: rawJSONString(text),
+				Content: content,
 			})
-			text = ""
+			parts, hasImage = nil, false
 		}
 
 		toolResults := msg.ToolResultsList()
@@ -83,7 +106,16 @@ func NormalizedToResponses(req *core.NormalizedRequest, model config.ModelConfig
 		for _, block := range msg.Blocks {
 			switch block.Type {
 			case "text":
-				text += block.Text
+				parts = append(parts, types.ResponsesContent{Type: "input_text", Text: block.Text})
+			case "image":
+				if block.Image == nil {
+					continue
+				}
+				parts = append(parts, types.ResponsesContent{
+					Type:     "input_image",
+					ImageURL: "data:" + block.Image.MediaType + ";base64," + block.Image.Data,
+				})
+				hasImage = true
 			case "tool_use":
 				flushText()
 				responsesReq.Input = append(responsesReq.Input, types.ResponsesInput{

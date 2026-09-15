@@ -66,6 +66,9 @@ type ResponsesOutput struct {
 type ResponsesContent struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
+	// ImageURL carries an input_image part, as a data URL for a pasted image
+	// ("data:image/png;base64,...") or a fully qualified URL.
+	ImageURL string `json:"image_url,omitempty"`
 }
 
 // ResponsesUsage represents token usage in a Responses response.

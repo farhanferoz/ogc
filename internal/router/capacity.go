@@ -1,12 +1,19 @@
 package router
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/routatic/proxy/internal/config"
 )
 
 const minimumOutputTokens = 256
+
+// ErrNoVisionModel means the request carries an image and every model in the
+// chain was skipped for that reason alone. It is the user's mistake to fix, so
+// the handler answers 400 with the reason rather than 500 "routing failed".
+var ErrNoVisionModel = errors.New("no model in the chain accepts images")
 
 // SkippedModel records a model that was excluded from the capacity decision,
 // along with the reason why. Callers inspect this list to understand why
@@ -87,9 +94,24 @@ func FilterByCapacity(chain []config.ModelConfig, inputTokens int, requestedMaxT
 	}
 
 	if len(decision.Models) == 0 {
+		if blocked := skippedFor(decision.Skipped, "vision_not_supported"); needsVision && len(blocked) == len(decision.Skipped) && len(blocked) > 0 {
+			return decision, fmt.Errorf("%w: the request contains an image, and %s cannot accept one (set \"vision\": true on a model that can)",
+				ErrNoVisionModel, strings.Join(blocked, ", "))
+		}
 		return decision, fmt.Errorf("no eligible model for request capacity")
 	}
 	return decision, nil
+}
+
+// skippedFor lists the models skipped for one reason.
+func skippedFor(skipped []SkippedModel, reason string) []string {
+	var models []string
+	for _, s := range skipped {
+		if s.Reason == reason {
+			models = append(models, s.ModelID)
+		}
+	}
+	return models
 }
 
 func clampOutputTokens(model config.ModelConfig, inputTokens int, requestedMaxTokens int) int {

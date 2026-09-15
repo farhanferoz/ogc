@@ -511,7 +511,10 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		status := http.StatusInternalServerError
 		message := "routing failed"
-		if errors.Is(err, router.ErrUnknownProvider) {
+		// A request the caller can fix — an unknown provider, or an image sent
+		// to models that cannot see — answers 400 with the reason, not a 500
+		// that says only "routing failed".
+		if errors.Is(err, router.ErrUnknownProvider) || errors.Is(err, router.ErrNoVisionModel) {
 			status = http.StatusBadRequest
 			message = err.Error()
 		}

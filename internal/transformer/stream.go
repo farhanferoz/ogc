@@ -870,6 +870,7 @@ func (h *StreamHandler) ProxyResponsesStream(
 	startedToolCalls := make(map[string]int)
 	toolArguments := make(map[string]*strings.Builder)
 	var terminalUsage *types.ResponsesUsage
+	sawTerminalEvent := false // response.completed or response.incomplete arrived
 	readBuf := readBufPool.Get().(*[]byte)
 	defer readBufPool.Put(readBuf)
 
@@ -888,7 +889,7 @@ func (h *StreamHandler) ProxyResponsesStream(
 			for i := 0; i < n; i++ {
 				b := (*readBuf)[i]
 				if b == '\n' {
-					if err := h.processResponsesSSELine(w, flusher, lineBuf, &contentIndex, &contentStarted, &reasoningStarted, &hasToolUse, startedToolCalls, toolArguments, originalModel, &terminalUsage); err != nil {
+					if err := h.processResponsesSSELine(w, flusher, lineBuf, &contentIndex, &contentStarted, &reasoningStarted, &hasToolUse, startedToolCalls, toolArguments, originalModel, &terminalUsage, &sawTerminalEvent); err != nil {
 						return err
 					}
 					lineBuf = lineBuf[:0]
@@ -900,7 +901,7 @@ func (h *StreamHandler) ProxyResponsesStream(
 
 		if err == io.EOF {
 			if len(lineBuf) > 0 {
-				if err := h.processResponsesSSELine(w, flusher, lineBuf, &contentIndex, &contentStarted, &reasoningStarted, &hasToolUse, startedToolCalls, toolArguments, originalModel, &terminalUsage); err != nil {
+				if err := h.processResponsesSSELine(w, flusher, lineBuf, &contentIndex, &contentStarted, &reasoningStarted, &hasToolUse, startedToolCalls, toolArguments, originalModel, &terminalUsage, &sawTerminalEvent); err != nil {
 					return err
 				}
 			}
@@ -915,6 +916,16 @@ func (h *StreamHandler) ProxyResponsesStream(
 			}
 			return fmt.Errorf("failed to read stream: %w", err)
 		}
+	}
+
+	if !sawTerminalEvent {
+		// The upstream connection closed cleanly (EOF) but never sent a
+		// response.completed or response.incomplete event. Closing this as a
+		// normal message_stop would hand Claude Code a message that looks
+		// complete but is actually truncated; surface it as an error instead
+		// so the caller can retry or report the failure rather than silently
+		// losing the turn.
+		return fmt.Errorf("upstream responses stream ended before response.completed")
 	}
 
 	// Flush arguments for a tool call whose completion event was not delivered
@@ -1002,6 +1013,7 @@ func (h *StreamHandler) processResponsesSSELine(
 	toolArguments map[string]*strings.Builder,
 	originalModel string,
 	terminalUsage **types.ResponsesUsage,
+	sawTerminalEvent *bool,
 ) error {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 || !bytes.HasPrefix(line, []byte("data: ")) {
@@ -1022,12 +1034,34 @@ func (h *StreamHandler) processResponsesSSELine(
 	// Flat shape: {"type":"response.completed","usage":{...}}.
 	// Nested shape: {"type":"response.completed","response":{"usage":{...}}}.
 	if chunk.Type == "response.completed" {
+		*sawTerminalEvent = true
 		if chunk.Usage != nil {
 			*terminalUsage = chunk.Usage
 		} else if chunk.Response != nil && chunk.Response.Usage != nil {
 			*terminalUsage = chunk.Response.Usage
 		}
 		return nil
+	}
+
+	// response.incomplete is also a defined terminal state (e.g. the
+	// response was truncated by max_output_tokens) — the turn ended for a
+	// legitimate reason, not because the connection was cut off, so it
+	// counts as a clean end the same as response.completed.
+	if chunk.Type == "response.incomplete" {
+		*sawTerminalEvent = true
+		if chunk.Usage != nil {
+			*terminalUsage = chunk.Usage
+		} else if chunk.Response != nil && chunk.Response.Usage != nil {
+			*terminalUsage = chunk.Response.Usage
+		}
+		return nil
+	}
+
+	// response.failed means the upstream itself reported the turn as
+	// failed — surface it as an error rather than closing the stream as if
+	// it had completed normally.
+	if chunk.Type == "response.failed" {
+		return fmt.Errorf("upstream responses stream failed: %s", data)
 	}
 
 	if chunk.Type == "response.output_text.delta" && chunk.Delta != "" {

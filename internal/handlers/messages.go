@@ -563,6 +563,8 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	if isStreaming {
+		// Carry the count to the stream writer, which puts it in message_start.
+		r = r.WithContext(core.WithInputTokens(r.Context(), tokenCount))
 		h.handleStreaming(w, r, &anthropicReq, normalizedReq, modelChain, rawBody, routeResult.Scenario, requestID, requestStart)
 	} else {
 		h.handleNonStreaming(w, r, &anthropicReq, normalizedReq, modelChain, rawBody, routeResult.Scenario, requestID)

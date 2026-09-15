@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/routatic/proxy/internal/core"
 	"github.com/routatic/proxy/pkg/types"
 )
 
@@ -217,7 +218,9 @@ func (h *StreamHandler) ProxyStream(
 	// Generate a unique message ID for this stream.
 	msgID := "msg_" + generateID()
 
-	// Send message_start event with the full message envelope.
+	// Send message_start event with the full message envelope. The input count
+	// is the proxy's own: a translated upstream reports usage only at the end
+	// of the turn, and Claude Code reads its context percentage from here.
 	msgStart := types.MessageEvent{
 		Type: "message_start",
 		Message: &types.MessageResponse{
@@ -226,6 +229,7 @@ func (h *StreamHandler) ProxyStream(
 			Role:    "assistant",
 			Content: []types.ContentBlock{},
 			Model:   originalModel,
+			Usage:   types.Usage{InputTokens: core.InputTokensFromContext(clientCtx)},
 		},
 	}
 	if err := writeSSEEvent(w, msgStart); err != nil {

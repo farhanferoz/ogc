@@ -13,6 +13,7 @@ import (
 
 	"github.com/routatic/proxy/internal/catalog"
 	"github.com/routatic/proxy/internal/config"
+	"github.com/routatic/proxy/internal/gomodels"
 	"github.com/routatic/proxy/internal/storage"
 )
 
@@ -31,6 +32,12 @@ type ModelRouter struct {
 	refreshDone  chan struct{}
 	updateSignal chan struct{}
 	refreshWG    sync.WaitGroup
+
+	// goModelsSnapshot is the live OpenCode Go model list synced by
+	// internal/gomodels, used as a routing fallback in resolveRequestedModel
+	// for a model that is in neither cfg.Models nor the models.dev catalog.
+	// Set via SetGoModelsSnapshot; nil means no snapshot has been loaded yet.
+	goModelsSnapshot atomic.Pointer[gomodels.Snapshot]
 }
 
 func NewModelRouter(atomic *config.AtomicConfig) *ModelRouter {
@@ -204,6 +211,50 @@ func describeRouting(trigger string, primary config.ModelConfig) string {
 	return fmt.Sprintf("%s -> resolved model %s", trigger, modelID)
 }
 
+// SetGoModelsSnapshot atomically swaps the live OpenCode Go model list used
+// as a routing fallback (see resolveRequestedModel) for a model that is in
+// neither cfg.Models nor the models.dev catalog. Safe to call from a
+// background refresher goroutine concurrently with requests. A nil snapshot
+// disables the fallback (nothing synced yet, or go_models is disabled).
+func (r *ModelRouter) SetGoModelsSnapshot(snap *gomodels.Snapshot) {
+	r.goModelsSnapshot.Store(snap)
+}
+
+// resolveFromGoModelsSnapshot looks up requestedModel by exact id in the
+// live OpenCode Go model list (see SetGoModelsSnapshot). A match's
+// wire_format is the snapshot's docs (or default) value, except that a
+// native_messages "yes" verdict means the model actually accepts the
+// Anthropic Messages endpoint, so that's what it's routed to. Temperature
+// and MaxTokens are inherited from cfg.Models["default"], matching
+// legacyUnknownModelConfig below.
+func (r *ModelRouter) resolveFromGoModelsSnapshot(cfg *config.Config, requestedModel string) (config.ModelConfig, bool) {
+	snap := r.goModelsSnapshot.Load()
+	if snap == nil {
+		return config.ModelConfig{}, false
+	}
+	for _, m := range snap.Models {
+		if m.ID != requestedModel {
+			continue
+		}
+		wireFormat := string(m.WireFormat)
+		if m.NativeMessages == gomodels.NativeSupportYes {
+			wireFormat = "anthropic"
+		}
+		primary := config.ModelConfig{
+			Provider:      config.ProviderOpenCodeGo,
+			ModelID:       m.ID,
+			WireFormat:    wireFormat,
+			ContextWindow: m.ContextWindow,
+		}
+		if def, ok := cfg.Models["default"]; ok {
+			primary.Temperature = def.Temperature
+			primary.MaxTokens = def.MaxTokens
+		}
+		return primary, true
+	}
+	return config.ModelConfig{}, false
+}
+
 // resolveRequestedModel checks if the user-specified model should override
 // scenario-based routing. Returns the route result and true if it matched,
 // or zero value and false if scenario routing should proceed normally.
@@ -218,11 +269,19 @@ func (r *ModelRouter) resolveRequestedModel(cfg *config.Config, requestedModel s
 	if !ok && canonicalRequestedModel != requestedModel {
 		primary, ok = cfg.Models[canonicalRequestedModel]
 	}
+	// Hand config always wins; the go-models snapshot is tried next, before
+	// the models.dev catalog, so a model OpenCode Go serves right now but
+	// nobody has hand-configured yet is still reachable with no config edit
+	// or restart.
 	if !ok {
-		// Not in legacy config — try the catalog before falling back to the
-		// legacy unknown-model behavior. Provider-qualified references that
-		// fail catalog resolution are rejected with a clear error instead of
-		// silently falling back to a bogus provider.
+		primary, ok = r.resolveFromGoModelsSnapshot(cfg, requestedModel)
+	}
+	if !ok {
+		// Not in legacy config or the go-models snapshot — try the catalog
+		// before falling back to the legacy unknown-model behavior.
+		// Provider-qualified references that fail catalog resolution are
+		// rejected with a clear error instead of silently falling back to a
+		// bogus provider.
 		sel, parseErr := catalog.ParseModelRef(requestedModel)
 		providerQualified := parseErr == nil && sel.Provider != ""
 
